@@ -1,19 +1,4 @@
-/* ===========================
-   FreshStop - app.js (browser)
-   ===========================
 
-   Wires up your HTML:
-   - Geolocate + "Use my location"
-   - Search (Nominatim) + dropdown
-   - Set Home (persist to localStorage) + Home pill
-   - Map click selects a point (selection card)
-   - Nearby stops list (name + inline weather + arrivals)
-   - "Best stop to get home?" pulses marker, shows route summary
-   - Directions card + Clear
-   - Weather: Open-Meteo (no key)
-   - Arrivals: BODS via Cloudflare Worker (CONFIG.PROXY_BASE)
-   - Routing: OSRM
-*/
 
 // ---- Non-secret defaults (override in config.js) ----
 window.CONFIG = Object.assign({
