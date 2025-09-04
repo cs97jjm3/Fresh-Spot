@@ -2,7 +2,7 @@
 const CONFIG = (window.FRESHSTOP_CONFIG || {});
 const OWM_KEY    = CONFIG.OWM_KEY;
 const ORS_KEY    = CONFIG.ORS_KEY;
-const TP_APP_ID  = CONFIG.TP_APP_ID;   // optional for live times
+const TP_APP_ID  = CONFIG.TP_APP_ID;   // optional for live times (TransportAPI)
 const TP_APP_KEY = CONFIG.TP_APP_KEY;  // optional
 
 if (!OWM_KEY) console.warn("Missing OWM_KEY. Create config.js with window.FRESHSTOP_CONFIG.");
@@ -50,8 +50,7 @@ let routeLine = null;
 let stopLayers = [];
 
 const wxNowCache = new Map();   // tile -> {temp, icon}
-const hourlyCache = new Map();  // tile -> [{ts,t,icon,tz}...]
-
+const hourlyCache = new Map();  // key "h3:lat,lon" -> [{ts,t,icon,tz},..]
 // Ordered relation member cache (for direction)
 const relMembersCache = new Map(); // relationId -> [nodeId,...]
 
@@ -76,7 +75,7 @@ function renderHomeUI() {
     elHomePill.textContent = "Home";
     if (elHomeResults) { elHomeResults.style.display = "none"; elHomeResults.innerHTML = ""; }
     if (elHomeOnlyWrap) elHomeOnlyWrap.style.display = "";
-    if (elHomeOnly) elHomeOnly.checked = true;
+    if (elHomeOnly) elHomeOnly.checked = true; // default ON when home exists
   } else {
     elHomeInput.style.display = "";
     elHomePill.style.display = "none";
@@ -87,23 +86,29 @@ function renderHomeUI() {
 }
 renderHomeUI();
 
-elHomeEdit && (elHomeEdit.onclick = () => {
-  clearHome();
-  elHomeInput.value = "";
-  elHomeInput.focus();
-});
-elHomeOnly && elHomeOnly.addEventListener("change", () => {
-  if (selectedPoint) loadStops(selectedPoint[0], selectedPoint[1], 800);
-});
+if (elHomeEdit) {
+  elHomeEdit.onclick = () => {
+    clearHome();
+    elHomeInput.value = "";
+    elHomeInput.focus();
+  };
+}
+if (elHomeOnly) {
+  elHomeOnly.addEventListener("change", () => {
+    if (selectedPoint) loadStops(selectedPoint[0], selectedPoint[1], 800);
+  });
+}
 
 // ======= Map interactions =======
 map.on("click", (e) => setSelected([e.latlng.lat, e.latlng.lng], "(map click)"));
 
-// Auto-select device location on load
+// Auto-select device location on load and force home filter if set
 if ("geolocation" in navigator) {
   navigator.geolocation.getCurrentPosition(
     (pos) => {
       myLocation = [pos.coords.latitude, pos.coords.longitude];
+      const home = getHome();
+      if (home && elHomeOnly) elHomeOnly.checked = true; // show only heading-home on load
       setSelected(myLocation, "My location");
       L.circle(myLocation, { radius: 6, color: "#0ea5e9", fillColor: "#0ea5e9", fillOpacity: 0.7 }).addTo(map);
     },
@@ -171,6 +176,39 @@ async function setSelected([lat,lng],source=""){
 }
 
 // ======= Weather (colourful; hide hours if absent) =======
+function renderHourly3Block(hours){
+  if (!hours || !hours.length) return "";
+  return `
+    <div class="wx-hours">
+      ${hours.map(h=>`
+        <div class="wx-hour" style="min-width:70px;">
+          <div>${hourStr(h.ts,h.tz)}</div>
+          ${h.icon?`<img src="${iconUrl(h.icon)}" alt="" />`:""}
+          <div class="t">${h.t}°C</div>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+async function fetchHourly3(lat, lon){
+  const key = `h3:${roundKey(lat,lon)}`;
+  if (hourlyCache.has(key)) return hourlyCache.get(key);
+  let hours = [];
+  try {
+    const one = await getJSON(`https://api.openweathermap.org/data/3.0/onecall?lat=${lat}&lon=${lon}&exclude=minutely,daily,alerts,current&units=metric&appid=${OWM_KEY}`);
+    const tz = one?.timezone_offset || 0;
+    hours = (one?.hourly||[]).slice(0,3).map(h => ({ ts:h.dt, t:Math.round(h.temp), icon:h.weather?.[0]?.icon, tz }));
+  } catch {
+    try {
+      const old = await getJSON(`https://api.openweathermap.org/data/2.5/onecall?lat=${lat}&lon=${lon}&exclude=minutely,daily,alerts,current&units=metric&appid=${OWM_KEY}`);
+      const tz = old?.timezone_offset || 0;
+      hours = (old?.hourly||[]).slice(0,3).map(h => ({ ts:h.dt, t:Math.round(h.temp), icon:h.weather?.[0]?.icon, tz }));
+    } catch {}
+  }
+  hourlyCache.set(key, hours);
+  return hours;
+}
+
 async function loadWeatherAndForecast(lat,lng){
   if(!OWM_KEY) throw new Error("Missing OpenWeatherMap key.");
 
@@ -190,32 +228,14 @@ async function loadWeatherAndForecast(lat,lng){
     return;
   }
 
-  // Hourly: try 3.0 → fallback to 2.5
+  // Hourly 3 for current location
   let hours=[];
-  try {
-    const one=await getJSON(`https://api.openweathermap.org/data/3.0/onecall?lat=${lat}&lon=${lng}&exclude=minutely,daily,alerts&units=metric&appid=${OWM_KEY}`);
-    const tz = one?.timezone_offset || 0;
-    hours=(one?.hourly||[]).slice(0,3).map(h=>({ts:h.dt,t:Math.round(h.temp),icon:h.weather?.[0]?.icon,tz}));
-  } catch {
-    try {
-      const old=await getJSON(`https://api.openweathermap.org/data/2.5/onecall?lat=${lat}&lon=${lng}&exclude=minutely,daily,alerts&units=metric&appid=${OWM_KEY}`);
-      const tz = old?.timezone_offset || 0;
-      hours=(old?.hourly||[]).slice(0,3).map(h=>({ts:h.dt,t:Math.round(h.temp),icon:h.weather?.[0]?.icon,tz}));
-    } catch {}
-  }
+  try { hours = await fetchHourly3(lat, lng); } catch {}
 
   const hoursBlock = (hours && hours.length)
     ? `
-      <div style="margin-top:10px; font-weight:700;">Next 2 hours</div>
-      <div class="wx-hours">
-        ${hours.map(h=>`
-          <div class="wx-hour">
-            <div>${hourStr(h.ts,h.tz)}</div>
-            ${h.icon?`<img src="${iconUrl(h.icon)}" alt="" />`:""}
-            <div class="t">${h.t}°C</div>
-          </div>
-        `).join("")}
-      </div>
+      <div style="margin-top:10px; font-weight:700;">Next 3 hours</div>
+      ${renderHourly3Block(hours)}
     ` : "";
 
   setHTML(elWeather, `
@@ -314,7 +334,11 @@ rel(bn)->.r;
 // Relation members (ordered) for direction check
 async function fetchRelationMembersOrdered(relationId) {
   if (relMembersCache.has(relationId)) return relMembersCache.get(relationId);
-  const q = ` [out:json][timeout:30]; rel(${relationId}); out body; `.trim();
+  const q = `
+[out:json][timeout:30];
+rel(${relationId});
+out body;
+`.trim();
   for (const url of OVERPASS_URLS) {
     try {
       const res = await fetch(url, { method:"POST", headers:{"Content-Type":"application/x-www-form-urlencoded"}, body:new URLSearchParams({ data:q }) });
@@ -395,8 +419,7 @@ out body 20;
 
 // ======= Direction-aware: Only stops heading toward Home =======
 async function getStopsTowardHomeSet(stopsNearYou, home) {
-  // 1) Home area stops within ~1 mile
-  const homeStops = await fetchHomeAreaStops(home, 1609);
+  const homeStops = await fetchHomeAreaStops(home, 1609); // ~1 mile
   if (!homeStops.length) return await nameHeuristicHomeSet(stopsNearYou, home);
   const homeIds = new Set(homeStops.map(s => s.id));
 
@@ -412,7 +435,7 @@ async function getStopsTowardHomeSet(stopsNearYou, home) {
         if (!orderedNodes.length) continue;
 
         const idxS = orderedNodes.indexOf(s.id);
-        if (idxS === -1) continue; // some relations may not include the exact stop node
+        if (idxS === -1) continue; // relation might not include this exact stop node
 
         for (let i = idxS + 1; i < orderedNodes.length; i++) {
           if (homeIds.has(orderedNodes[i])) { towardsHome = true; break; }
@@ -445,9 +468,9 @@ async function nameHeuristicHomeSet(stops, home) {
   return out;
 }
 
-// ======= Stops (filter, routes, live times) =======
+// ======= Stops (filter, routes, live times, best stop banner) =======
 async function loadStops(lat,lng,radius=800){
-  elStopsRadius && (elStopsRadius.textContent = radius);
+  if (elStopsRadius) elStopsRadius.textContent = radius;
   const q = `
 [out:json][timeout:25];
 (
@@ -493,6 +516,10 @@ out skel qt;
     stops = stops.filter(s => homeSet.has(s.id));
   }
 
+  // Clear any previous banner
+  const bannerExisting = document.getElementById("best-stop-banner");
+  if (bannerExisting) bannerExisting.remove();
+
   if (!stops.length) {
     setHTML(elStopsList, `
       <div class="muted" style="padding:8px;">
@@ -514,6 +541,43 @@ out skel qt;
       .bindTooltip(`${s.name} (${s.kind})`);
     stopLayers.push(m);
   }
+
+  // Best stop banner (nearest)
+  const best = stops[0];
+  const banner = document.createElement("div");
+  banner.id = "best-stop-banner";
+  banner.style.cssText = "padding:10px; border:1px solid #e5e7eb; border-radius:12px; margin:8px 0 12px 0; box-shadow:0 6px 16px rgba(0,0,0,.06); background:linear-gradient(135deg,#0ea5e91a,#10b9811a);";
+
+  // Next bus (live with fallback)
+  let nextText = "n/a";
+  try {
+    const rows = await fetchLiveBusTimes(best.atco, best.kind);
+    if (rows && rows.length) {
+      const mins = rows.map(r => parseInt(String(r.due).replace(/\D+/g,""),10)).filter(n => !isNaN(n));
+      if (mins.length) nextText = `${Math.min(...mins)} min`;
+      else nextText = rows[0].due || "n/a";
+    }
+  } catch {}
+
+  // Hourly 3 for best stop
+  let hoursHTML = "";
+  try { hoursHTML = renderHourly3Block(await fetchHourly3(best.pos[0], best.pos[1])); } catch {}
+
+  banner.innerHTML = `
+    <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:10px;">
+      <div>
+        <div style="font-weight:800;">Best stop to get home</div>
+        <div class="muted" style="font-size:12px;">${escapeHtml(best.name)} • ${miles(best.dist)} mi • ${best.kind === "bus" ? "Bus" : "Rail/Tram"}</div>
+        <div style="margin-top:6px; font-weight:600;">Next bus: <span class="pill" style="background:#10b981; color:#fff;">${nextText}</span></div>
+      </div>
+      <div>
+        <button class="btn" id="btn-route-best">Route</button>
+      </div>
+    </div>
+    <div style="margin-top:8px;">${hoursHTML}</div>
+  `;
+  // Insert banner before the list
+  elStopsList.parentNode.insertBefore(banner, elStopsList);
 
   // Render list
   setHTML(elStopsList, stops.map(s => `
@@ -540,7 +604,7 @@ out skel qt;
   `).join(""));
   show(elStops);
 
-  // Per-stop tiny weather
+  // Per-stop tiny weather + hourly (throttled)
   await fillStopsWeather(stops);
 
   // OSM route labels + live times
@@ -551,18 +615,26 @@ out skel qt;
     }).catch(()=>{});
 
     const liveEl = document.getElementById(`live-${s.id}`);
-    if (s.kind === "bus" && s.atco && TP_APP_ID && TP_APP_KEY) {
-      fetchLiveBusTimes(s.atco).then(rows => {
-        if (!liveEl) return;
-        if (!rows.length) { liveEl.textContent = "Live: n/a"; return; }
-        liveEl.textContent = "Live: " + rows.map(r => `${r.line} → ${r.dir} (${r.due})`).join(" • ");
-      }).catch(()=>{ if (liveEl) liveEl.textContent = "Live: n/a"; });
-    } else {
-      if (liveEl) liveEl.textContent = "Live: n/a";
-    }
+    fetchLiveBusTimes(s.atco, s.kind).then(rows => {
+      if (!liveEl) return;
+      if (!rows || !rows.length) { liveEl.textContent = "Live: n/a"; return; }
+      liveEl.textContent = "Live: " + rows.map(r => `${r.line} → ${r.dir} (${r.due})`).join(" • ");
+    }).catch(()=>{ if (liveEl) liveEl.textContent = "Live: n/a"; });
   }
 
-  // Route buttons
+  // Wire banner route button
+  const btnBest = document.getElementById("btn-route-best");
+  if (btnBest) {
+    btnBest.onclick = async () => {
+      hide(elErrors);
+      try {
+        const origin = await getOrigin();
+        routeBetween(origin, best.pos);
+      } catch (err) { showError(err.message || "Couldn’t start routing."); }
+    };
+  }
+
+  // Wire route buttons per item
   [...elStopsList.querySelectorAll("button[data-route]")].forEach(btn => {
     btn.onclick = async () => {
       hide(elErrors);
@@ -572,68 +644,121 @@ out skel qt;
         const s = stops.find(x => x.id.toString() === id);
         if (!s) return;
         routeBetween(origin, s.pos);
-      } catch (err) {
-        showError(err.message || "Couldn’t start routing.");
-      }
+      } catch (err) { showError(err.message || "Couldn’t start routing."); }
     };
   });
 }
 
+// Per-stop weather (current for many, hourly for nearest few)
 async function fillStopsWeather(stops) {
-  const MAX_FETCH = 8;
-  let remaining = MAX_FETCH;
+  if (!OWM_KEY) {
+    for (const s of stops) {
+      const el = document.getElementById(`wx-${s.id}`);
+      if (el) el.innerHTML = `<span class="pill">n/a</span>`;
+    }
+    return;
+  }
+  const MAX_CUR_FETCH = 10; // current wx
+  const MAX_HOURLY3   = 5;  // hourly for nearest few
+  let curRemaining = MAX_CUR_FETCH;
+  let h3Remaining  = MAX_HOURLY3;
+
   for (const s of stops) {
-    const key = roundKey(s.pos[0], s.pos[1]);
-    let wx = wxNowCache.get(key);
-    if (!wx && remaining > 0) {
+    const el = document.getElementById(`wx-${s.id}`);
+    if (!el) continue;
+
+    let wx = wxNowCache.get(roundKey(s.pos[0], s.pos[1]));
+    if (!wx && curRemaining > 0) {
       try {
         const w = await getJSON(`https://api.openweathermap.org/data/2.5/weather?lat=${s.pos[0]}&lon=${s.pos[1]}&units=metric&appid=${OWM_KEY}`);
         wx = { temp: Math.round(w?.main?.temp ?? 0), icon: w?.weather?.[0]?.icon };
-        wxNowCache.set(key, wx);
-        remaining--;
+        wxNowCache.set(roundKey(s.pos[0], s.pos[1]), wx);
+        curRemaining--;
       } catch {}
     }
-    const el = document.getElementById(`wx-${s.id}`);
-    if (!el) continue;
-    el.innerHTML = (wx && wx.icon != null)
-      ? `<img src="${iconUrl(wx.icon)}" alt="" /><strong>${wx.temp}°C</strong>`
-      : `<span class="pill">n/a</span>`;
+
+    let hoursBlock = "";
+    if (h3Remaining > 0) {
+      try {
+        const hours = await fetchHourly3(s.pos[0], s.pos[1]);
+        hoursBlock = renderHourly3Block(hours);
+        h3Remaining--;
+      } catch {}
+    }
+
+    if (wx && wx.icon != null) {
+      el.innerHTML = `
+        <div style="display:flex; gap:6px; align-items:center;">
+          <img src="${iconUrl(wx.icon)}" alt="" width="32" height="32"/>
+          <strong>${wx.temp}°C</strong>
+        </div>
+        ${hoursBlock}
+      `;
+    } else {
+      el.innerHTML = `<span class="pill">n/a</span>${hoursBlock}`;
+    }
   }
 }
 
-// ======= TransportAPI: live bus times =======
-async function fetchLiveBusTimes(atco) {
-  if (!TP_APP_ID || !TP_APP_KEY) throw new Error("No TransportAPI keys");
-  const url = `https://transportapi.com/v3/uk/bus/stop/${encodeURIComponent(atco)}/live.json?app_id=${encodeURIComponent(TP_APP_ID)}&app_key=${encodeURIComponent(TP_APP_KEY)}&group=route&nextbuses=yes`;
-  const data = await getJSON(url);
-  const departures = data?.departures || {};
-  const lines = Object.keys(departures);
-  let out = [];
-  for (const line of lines) {
-    const arr = departures[line] || [];
-    for (const d of arr.slice(0, 2)) {
-      out.push({
-        line,
-        dir: d.direction || d.destination || "",
-        due: d.best_departure_estimate || d.best_departure_estimate_mins || d.aimed_departure_time || ""
+// ======= Live times with fallback: TransportAPI -> TfL =======
+function looksLikeTflAtco(atco){ return typeof atco === "string" && /^490/.test(atco); }
+
+// Returns array of { line, dir, due } (due in "X min" or "HH:MM" or "n/a")
+async function fetchLiveBusTimes(atco, kind="bus") {
+  if (!atco || kind !== "bus") return [];
+
+  // Primary: TransportAPI if keys present
+  if (TP_APP_ID && TP_APP_KEY) {
+    try {
+      const url = `https://transportapi.com/v3/uk/bus/stop/${encodeURIComponent(atco)}/live.json?app_id=${encodeURIComponent(TP_APP_ID)}&app_key=${encodeURIComponent(TP_APP_KEY)}&group=route&nextbuses=yes`;
+      const data = await getJSON(url);
+      const departures = data?.departures || {};
+      const lines = Object.keys(departures);
+      let out = [];
+      for (const line of lines) {
+        const arr = departures[line] || [];
+        for (const d of arr.slice(0, 2)) {
+          out.push({
+            line,
+            dir: d.direction || d.destination || "",
+            due: d.best_departure_estimate || d.best_departure_estimate_mins || d.aimed_departure_time || ""
+          });
+        }
+      }
+      const now = new Date();
+      out = out.slice(0, 6).map(x => {
+        const hhmm = /^(\d{2}):(\d{2})$/.exec(x.due || "");
+        if (hhmm) {
+          const t = new Date(now);
+          t.setHours(+hhmm[1], +hhmm[2], 0, 0);
+          let mins = Math.round((t - now) / 60000);
+          if (mins < 0) mins = 0;
+          return { ...x, due: `${mins} min` };
+        }
+        const n = parseInt(String(x.due).replace(/\D+/g, ""), 10);
+        if (!isNaN(n)) return { ...x, due: `${n} min` };
+        return { ...x, due: String(x.due || "n/a") };
       });
-    }
+      if (out.length) return out;
+    } catch { /* fall through to TfL */ }
   }
-  const now = new Date();
-  out = out.slice(0, 4).map(x => {
-    const hhmm = /^(\d{2}):(\d{2})$/.exec(x.due || "");
-    if (hhmm) {
-      const t = new Date(now);
-      t.setHours(+hhmm[1], +hhmm[2], 0, 0);
-      let mins = Math.round((t - now) / 60000);
-      if (mins < 0) mins = 0;
-      return { ...x, due: `${mins} min` };
-    }
-    const n = parseInt(String(x.due).replace(/\D+/g, ""), 10);
-    if (!isNaN(n)) return { ...x, due: `${n} min` };
-    return x;
-  });
-  return out;
+
+  // Fallback: TfL Unified API (London only; no key required)
+  if (looksLikeTflAtco(atco)) {
+    try {
+      const url = `https://api.tfl.gov.uk/StopPoint/${encodeURIComponent(atco)}/Arrivals`;
+      const arr = await getJSON(url);
+      const sorted = (arr || []).sort((a,b) => (a.timeToStation||0) - (b.timeToStation||0));
+      return sorted.slice(0, 6).map(x => ({
+        line: x.lineName || x.lineId || "",
+        dir: x.destinationName || "",
+        due: (typeof x.timeToStation === "number") ? `${Math.max(0, Math.round(x.timeToStation/60))} min` : "n/a"
+      }));
+    } catch { /* no luck */ }
+  }
+
+  // No source available
+  return [];
 }
 
 // ======= Routing =======
@@ -645,15 +770,19 @@ elBtnRoute.onclick = async () => {
     routeBetween(origin, selectedPoint);
   } catch (err) { showError(err.message || "Couldn’t start routing."); }
 };
-elBtnRouteHome && (elBtnRouteHome.onclick = async () => {
-  const home = getHome(); if (!home) return showError("Set Home first (top bar).");
-  hide(elErrors); hide(elRouteSummary);
-  try {
-    const origin = await getOrigin();
-    routeBetween(origin, [home.lat, home.lon]);
-  } catch (e) { showError(e.message || "Couldn’t start routing to Home."); }
-});
-elBtnClearRoute && (elBtnClearRoute.onclick = () => { clearRoute(); hide(elDirections); hide(elRouteSummary); });
+if (elBtnRouteHome) {
+  elBtnRouteHome.onclick = async () => {
+    const home = getHome(); if (!home) return showError("Set Home first (top bar).");
+    hide(elErrors); hide(elRouteSummary);
+    try {
+      const origin = await getOrigin();
+      routeBetween(origin, [home.lat, home.lon]);
+    } catch (e) { showError(e.message || "Couldn’t start routing to Home."); }
+  };
+}
+if (elBtnClearRoute) {
+  elBtnClearRoute.onclick = () => { clearRoute(); hide(elDirections); hide(elRouteSummary); };
+}
 
 function clearRoute(){ if(routeLine) routeLine.remove(); routeLine=null; setHTML(elDirSteps,""); }
 
@@ -724,8 +853,6 @@ function drawRoute(route){
     hide(elDirections);
   }
 }
-
-
 
 // ======= Search (places) =======
 let searchTimer;
@@ -847,7 +974,6 @@ async function getJSON(u, h = {}) {
   }
   return await r.json();
 }
-
 function getCurrentPosition() {
   return new Promise((resolve, reject) => {
     if (!navigator.geolocation) return reject(new Error("Geolocation unsupported"));
@@ -858,7 +984,6 @@ function getCurrentPosition() {
     );
   });
 }
-
 function showError(m) {
   setHTML(elErrors, `⚠️ ${m}`);
   show(elErrors);
