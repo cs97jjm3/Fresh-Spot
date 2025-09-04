@@ -35,6 +35,9 @@ const elHomeSave    = document.getElementById("home-save");
 const elHomeView    = document.getElementById("home-view");
 const elHomeDisplay = document.getElementById("home-display");
 const elHomeEdit    = document.getElementById("home-edit");
+const elHomePill    = document.getElementById("home-pill");
+const elHomeResults = document.getElementById("home-results");
+
 
 // ======= Map setup =======
 const map = L.map("map");
