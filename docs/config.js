@@ -20,7 +20,7 @@ window.CONFIG = {
   TFL: {
     ENABLED: true,
     APP_ID: "",   // optional
-    APP_KEY: ""   // optional
+    APP_KEY: "015957588b78493ea496bf478049a0fb"   // optional
   },
 
   // BODS / SIRI-VM (optional; browser access often blocked by CORS — leave off unless you proxy)
