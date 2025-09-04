@@ -20,7 +20,7 @@
 
   <style>
     :root {
-      --bg: #0b0c10;        /* dark header */
+      --bg: #0b0c10;        /* header */
       --fg: #ffffff;
       --line: #e5e7eb;      /* borders */
       --muted: #6b7280;     /* text-muted */
@@ -28,9 +28,18 @@
       --bus: #0ea5e9;
       --train: #10b981;
       --dest: #ef4444;
+
+      --good: #16a34a;
+      --fair: #84cc16;
+      --moderate: #eab308;
+      --poor: #f97316;
+      --vpoor: #ef4444;
+      --card-bg: #ffffff;
+      --chip-bg: #f1f5f9;
     }
+
     * { box-sizing: border-box; }
-    body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color: #111; }
+    body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color: #111; background: #fafafa; }
     header {
       display: flex; gap: 12px; align-items: center; padding: 10px 12px;
       background: var(--bg); color: var(--fg);
@@ -40,9 +49,9 @@
     .container { display: grid; grid-template-rows: auto 1fr auto; height: 100vh; }
     .main { display: grid; grid-template-columns: 1.7fr 1fr; min-height: 0; }
     @media (max-width: 900px) { .main { grid-template-columns: 1fr; } }
-    #map { height: calc(100vh - 160px); width: 100%; }
+    #map { height: calc(100vh - 170px); width: 100%; }
     @media (max-width: 900px) { #map { height: 50vh; } }
-    aside { border-left: 1px solid var(--line); padding: 12px; min-height: 0; overflow: auto; }
+    aside { border-left: 1px solid var(--line); padding: 12px; min-height: 0; overflow: auto; background: #fcfcfd; }
     @media (max-width: 900px) { aside { border-left: none; border-top: 1px solid var(--line); } }
     .row { display: flex; gap: 8px; align-items: center; }
     .search { position: relative; width: 100%; max-width: 520px; margin-left: auto; }
@@ -57,23 +66,50 @@
     }
     .dropdown button { display: block; width: 100%; text-align: left; padding: 10px 12px; border: 0; background: #fff; cursor: pointer; }
     .dropdown button:hover { background: #f9fafb; }
-    .card { border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+
+    .card { border: 1px solid var(--line); border-radius: 16px; padding: 12px; background: var(--card-bg); box-shadow: 0 10px 22px rgba(0,0,0,.04); }
     .muted { color: var(--muted); font-size: 14px; }
     .error { color: #b91c1c; }
-    .pill { display: inline-block; padding: 3px 8px; border-radius: 999px; background: #f1f5f9; font-size: 12px; }
+    .pill { display: inline-block; padding: 3px 8px; border-radius: 999px; background: var(--chip-bg); font-size: 12px; }
     .btn { border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; background: #fff; cursor: pointer; }
     .btn.primary { background: var(--brand); color: white; border-color: var(--brand); }
     footer { border-top: 1px solid var(--line); padding: 10px 12px; font-size: 12px; color: var(--muted); }
-    .stack { display: grid; gap: 10px; }
+    .stack { display: grid; gap: 12px; }
     .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
     @media (max-width: 420px) { .grid2 { grid-template-columns: 1fr; } }
     .kv { display:flex; justify-content: space-between; gap: 10px; font-size: 14px; }
     .list { display: grid; gap: 8px; }
-    .stop-item { display:flex; justify-content: space-between; gap:8px; align-items: center; }
+
+    /* Stops list */
+    .stop-item { display:flex; justify-content: space-between; gap:10px; align-items: center; padding: 8px; border-radius: 12px; background: #fff; border: 1px solid #eef2f7; }
+    .stop-left { display:flex; gap:10px; align-items:center; }
     .stop-name { font-weight: 600; }
     .stop-kind { font-size: 12px; padding: 2px 6px; border-radius: 999px; }
-    .kind-bus { background: rgba(14,165,233,.1); color: #0369a1; }
-    .kind-train { background: rgba(16,185,129,.12); color: #065f46; }
+    .kind-bus { background: rgba(14,165,233,.12); color: #0369a1; }
+    .kind-train { background: rgba(16,185,129,.14); color: #065f46; }
+    .stop-wx { display:flex; gap:6px; align-items:center; font-size: 13px; color:#111; }
+    .stop-wx img { width: 22px; height: 22px; image-rendering: -webkit-optimize-contrast; }
+
+    /* Weather WOW */
+    .wx-top { display:flex; align-items:center; justify-content: space-between; }
+    .wx-main { display:flex; align-items:center; gap: 12px; }
+    .wx-temp { font-size: 40px; font-weight: 800; line-height: .9; }
+    .wx-desc { font-size: 14px; color:#334155; }
+    .wx-hours { display:grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap:10px; margin-top: 10px; }
+    .wx-hour { border: 1px solid #eef2f7; border-radius: 12px; padding: 8px; text-align:center; background: #fff; }
+    .wx-hour .t { font-weight: 700; }
+    .wx-hour img { width: 36px; height: 36px; }
+
+    /* AQI WOW */
+    .aqi-badge { font-weight: 700; padding: 6px 10px; border-radius: 999px; color: white; display:inline-block; }
+    .aqi-good { background: var(--good); }
+    .aqi-fair { background: var(--fair); color:#1f2937; }
+    .aqi-moderate { background: var(--moderate); color:#1f2937; }
+    .aqi-poor { background: var(--poor); }
+    .aqi-vpoor { background: var(--vpoor); }
+    .bar { height: 8px; background: #e5e7eb; border-radius: 999px; overflow: hidden; }
+    .bar > span { display:block; height: 100%; background: linear-gradient(90deg, var(--good), var(--moderate), var(--vpoor)); }
+
     .dir-step { font-size: 14px; }
   </style>
 </head>
@@ -91,7 +127,7 @@
     <div class="main">
       <div>
         <div id="map"></div>
-        <div style="padding:12px; border-top:1px solid var(--line); display:flex; gap:8px; flex-wrap: wrap; align-items:center;">
+        <div style="padding:12px; border-top:1px solid var(--line); display:flex; gap:8px; flex-wrap: wrap; align-items:center; background:#fff;">
           <button id="btn-my-location" class="btn">Use my location</button>
           <button id="btn-route" class="btn primary" title="Route: my location → selected point">Get walking route</button>
           <span id="route-summary" class="pill" style="display:none;"></span>
@@ -135,7 +171,7 @@
     </footer>
   </div>
 
-  <!-- Your private keys file (DO NOT COMMIT) -->
+  <!-- Keys (DO NOT COMMIT) -->
   <script src="config.js"></script>
 
   <!-- App code -->
