@@ -1,7 +1,7 @@
 // ======= Config & guards =======
 const CONFIG = (window.FRESHSTOP_CONFIG || {});
 const OWM_KEY = CONFIG.OWM_KEY; // OpenWeatherMap key (required)
-const ORS_KEY = CONFIG.ORS_KEY; // OpenRouteService key (optional fallback for routing)
+const ORS_KEY = CONFIG.ORS_KEY; // OpenRouteService key (optional fallback)
 
 if (!OWM_KEY) {
   console.warn("Missing OWM_KEY. Create config.js with window.FRESHSTOP_CONFIG. See instructions.");
@@ -40,6 +40,10 @@ let selectedMarker = null;
 let routeLine = null;
 let stopLayers = [];         // circle markers for stops
 
+// Simple in-memory caches to avoid hammering OWM
+const wxNowCache = new Map();     // key: lat,lon rounded -> { temp, icon, desc, name, country }
+const hourlyCache = new Map();    // key: lat,lon rounded -> [hourly items]
+
 // click to select point
 map.on("click", (e) => {
   setSelected([e.latlng.lat, e.latlng.lng], "(map click)");
@@ -51,7 +55,6 @@ if ("geolocation" in navigator) {
     (pos) => {
       myLocation = [pos.coords.latitude, pos.coords.longitude];
       map.setView(myLocation, 14);
-      // hint current position
       L.circle(myLocation, { radius: 6, color: "#0ea5e9", fillColor: "#0ea5e9", fillOpacity: 0.7 }).addTo(map);
     },
     () => {}
@@ -59,12 +62,12 @@ if ("geolocation" in navigator) {
 }
 
 // ======= UI helpers =======
-function fmt(n) { return Intl.NumberFormat().format(n); }
 function show(el) { el.style.display = ""; }
 function hide(el) { el.style.display = "none"; }
 function setHTML(el, html) { el.innerHTML = html; }
 function km(meters) { return (meters / 1000).toFixed(2); }
 function minutes(seconds) { return Math.round(seconds / 60); }
+function roundKey(lat, lon) { return `${lat.toFixed(2)},${lon.toFixed(2)}`; } // ~1-2km tile
 function haversine(a, b) {
   const toRad = d => d * Math.PI / 180;
   const R = 6371000;
@@ -74,6 +77,14 @@ function haversine(a, b) {
   const lat2 = toRad(b[0]);
   const h = Math.sin(dLat/2)**2 + Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLon/2)**2;
   return 2*R*Math.asin(Math.sqrt(h));
+}
+function escapeHtml(s="") {
+  return s.replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;");
+}
+function iconUrl(code) { return `https://openweathermap.org/img/wn/${code}@2x.png`; }
+function hourStr(ts, tzOffsetSec = 0) {
+  const d = new Date((ts + tzOffsetSec) * 1000);
+  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
 // ======= Selection workflow =======
@@ -114,7 +125,7 @@ async function setSelected([lat, lng], source = "") {
   // load weather + air + stops (in parallel)
   try {
     await Promise.all([
-      loadWeather(lat, lng),
+      loadWeatherAndForecast(lat, lng),
       loadAir(lat, lng),
       loadStops(lat, lng, 800) // meters
     ]);
@@ -124,43 +135,127 @@ async function setSelected([lat, lng], source = "") {
   }
 }
 
-async function loadWeather(lat, lng) {
+// ======= Weather + Next 2 hours =======
+async function loadWeatherAndForecast(lat, lng) {
   if (!OWM_KEY) throw new Error("Missing OpenWeatherMap key.");
+
+  // Current weather
   const wx = await getJSON(`https://api.openweathermap.org/data/2.5/weather?lat=${lat}&lon=${lng}&units=metric&appid=${OWM_KEY}`);
   const t = Math.round(wx?.main?.temp ?? 0);
   const feels = Math.round(wx?.main?.feels_like ?? 0);
   const desc = (wx?.weather?.[0]?.description || "").replace(/^\w/, c => c.toUpperCase());
   const wind = Math.round(wx?.wind?.speed ?? 0);
   const place = [wx?.name, wx?.sys?.country].filter(Boolean).join(", ");
+  const icon = wx?.weather?.[0]?.icon;
+
+  // Cache “now” for nearby stops reuse
+  wxNowCache.set(roundKey(lat, lng), {
+    temp: t, icon, desc, name: wx?.name, country: wx?.sys?.country
+  });
+
+  // Try OneCall hourly (hourly forecast) — fallback to 3-hour /forecast if unavailable
+  let hours = [];
+  try {
+    const one = await getJSON(`https://api.openweathermap.org/data/3.0/onecall?lat=${lat}&lon=${lng}&exclude=minutely,daily,alerts&units=metric&appid=${OWM_KEY}`);
+    const tz = one?.timezone_offset || 0;
+    hours = (one?.hourly || []).slice(0, 3).map(h => ({
+      ts: h.dt, t: Math.round(h.temp), icon: h.weather?.[0]?.icon, tz
+    }));
+  } catch {
+    // Fallback: 3h forecast — take first two buckets (approx next 2-6 hours)
+    const fc = await getJSON(`https://api.openweathermap.org/data/2.5/forecast?lat=${lat}&lon=${lng}&units=metric&cnt=2&appid=${OWM_KEY}`);
+    hours = (fc?.list || []).map(h => ({
+      ts: Math.floor(new Date(h.dt_txt).getTime()/1000),
+      t: Math.round(h.main?.temp),
+      icon: h.weather?.[0]?.icon,
+      tz: 0
+    }));
+  }
+  hourlyCache.set(roundKey(lat, lng), hours);
+
+  // Render WOW weather
   setHTML(elWeather, `
-    <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
-      <div>
-        <div style="font-weight:600; margin-bottom:4px;">Weather ${place ? `<span class="pill">${place}</span>` : ""}</div>
-        <div>${t}°C, ${desc}</div>
-        <div class="muted">Feels like ${feels}°C • Wind ${wind} m/s</div>
+    <div class="wx-top">
+      <div class="wx-main">
+        ${icon ? `<img src="${iconUrl(icon)}" width="64" height="64" alt="${escapeHtml(desc)}" />` : ""}
+        <div>
+          <div class="wx-temp">${t}°C</div>
+          <div class="wx-desc">${escapeHtml(desc)} ${place ? `• <span class="pill">${escapeHtml(place)}</span>` : ""}</div>
+          <div class="muted">Feels like ${feels}°C • Wind ${wind} m/s</div>
+        </div>
       </div>
+    </div>
+
+    <div style="margin-top:10px; font-weight:700;">Next 2 hours</div>
+    <div class="wx-hours">
+      ${hours.map(h => `
+        <div class="wx-hour">
+          <div>${hourStr(h.ts, h.tz)}</div>
+          ${h.icon ? `<img src="${iconUrl(h.icon)}" alt="" />` : ""}
+          <div class="t">${h.t}°C</div>
+        </div>
+      `).join("")}
     </div>
   `);
   show(elWeather);
 }
 
+// ======= Air Quality WOW =======
+function aqiClass(n) {
+  switch (n) {
+    case 1: return ["Good","aqi-good"];
+    case 2: return ["Fair","aqi-fair"];
+    case 3: return ["Moderate","aqi-moderate"];
+    case 4: return ["Poor","aqi-poor"];
+    case 5: return ["Very Poor","aqi-vpoor"];
+    default: return ["Unknown","aqi-moderate"];
+  }
+}
+function pct(value, max) { return Math.max(0, Math.min(100, Math.round((value / max) * 100))); }
+
 async function loadAir(lat, lng) {
   if (!OWM_KEY) throw new Error("Missing OpenWeatherMap key.");
   const air = await getJSON(`https://api.openweathermap.org/data/2.5/air_pollution?lat=${lat}&lon=${lng}&appid=${OWM_KEY}`);
-  const c = air?.list?.[0]?.components || {};
-  const pairs = Object.entries(c);
-  const grid = pairs.length
-    ? pairs.map(([k, v]) => `<div class="kv"><span>${k.toUpperCase()}</span><span>${v}</span></div>`).join("")
-    : `<div class="muted">No air quality data.</div>`;
+
+  const main = air?.list?.[0]?.main || {};
+  const comp = air?.list?.[0]?.components || {};
+  const [label, cls] = aqiClass(main.aqi || 0);
+
+  // Key pollutants with indicative scales (μg/m³): rough, for visual only
+  const scales = {
+    pm2_5: 75,   // WHO 24h guideline is lower; using higher cap for bar range
+    pm10: 150,
+    no2: 200,
+    o3: 180
+  };
+
   setHTML(elAir, `
-    <div style="font-weight:600; margin-bottom:6px;">Air quality (μg/m³)</div>
-    <div class="grid2">${grid}</div>
-    <div class="muted" style="margin-top:6px;">Source: OpenWeatherMap</div>
+    <div style="display:flex; align-items:center; justify-content:space-between;">
+      <div>
+        <div style="font-weight:700; margin-bottom:4px;">Air quality</div>
+        <div class="muted" style="font-size:12px;">OpenWeatherMap AQI (1–5)</div>
+      </div>
+      <div class="aqi-badge ${cls}">AQI ${main.aqi ?? "?"} • ${label}</div>
+    </div>
+
+    <div style="margin-top:10px; display:grid; gap:10px;">
+      ${["pm2_5","pm10","no2","o3"].map(k => {
+        const v = comp[k];
+        const max = scales[k];
+        const percentage = pct(v ?? 0, max);
+        return `
+          <div>
+            <div class="kv"><span>${k.toUpperCase()}</span><span>${v != null ? v : "—"} μg/m³</span></div>
+            <div class="bar"><span style="width:${percentage}%;"></span></div>
+          </div>
+        `;
+      }).join("")}
+    </div>
   `);
   show(elAir);
 }
 
-// ======= Stops (Overpass) =======
+// ======= Stops (Overpass) + Weather per stop =======
 async function loadStops(lat, lng, radiusMeters = 800) {
   elStopsRadius.textContent = radiusMeters;
   const query = `
@@ -176,7 +271,7 @@ out skel qt;
 `.trim();
 
   const data = await overpass(query);
-  const stops = (data.elements || [])
+  let stops = (data.elements || [])
     .filter(el => el.type === "node")
     .map(el => {
       const tags = el.tags || {};
@@ -189,38 +284,40 @@ out skel qt;
       return { id: el.id, kind, name, pos, dist, tags };
     })
     .sort((a, b) => a.dist - b.dist)
-    .slice(0, 20);
+    .slice(0, 12); // cap list for clarity + fewer API calls
 
-  // render list
-  if (!stops.length) {
-    setHTML(elStopsList, `<div class="muted">No stops found within ${radiusMeters} m.</div>`);
-  } else {
-    setHTML(elStopsList, stops.map(s => `
-      <div class="stop-item">
-        <div>
-          <div class="stop-name">${escapeHtml(s.name)}</div>
-          <div class="muted" style="font-size:12px;">${s.kind === "bus" ? "Bus stop" : "Train/Tram"} • ${Math.round(s.dist)} m</div>
-        </div>
-        <div style="display:flex; gap:6px; align-items:center;">
-          <span class="stop-kind ${s.kind === "bus" ? "kind-bus" : "kind-train"}">${s.kind}</span>
-          <button class="btn" data-stop="${s.id}" title="Route from my location to this stop">Route</button>
-        </div>
-      </div>
-    `).join(""));
-  }
-
-  // draw markers
+  // Draw markers
   clearStops();
   for (const s of stops) {
     const color = s.kind === "bus" ? "#0ea5e9" : "#10b981";
-    const m = L.circleMarker(s.pos, { radius: 6, color, fillColor: color, fillOpacity: 0.8 })
+    const m = L.circleMarker(s.pos, { radius: 6, color, fillColor: color, fillOpacity: 0.85 })
       .addTo(map)
       .bindTooltip(`${s.name} (${s.kind})`);
     stopLayers.push(m);
   }
 
-  // wire route buttons
-  [...elStopsList.querySelectorAll("button[data-stop]")].forEach(btn => {
+  // Render list first (with placeholders for weather)
+  setHTML(elStopsList, stops.map(s => `
+    <div class="stop-item" data-stop="${s.id}">
+      <div class="stop-left">
+        <div class="stop-wx" id="wx-${s.id}"><span class="muted">…</span></div>
+        <div>
+          <div class="stop-name">${escapeHtml(s.name)}</div>
+          <div class="muted" style="font-size:12px;">${s.kind === "bus" ? "Bus stop" : "Train/Tram"} • ${Math.round(s.dist)} m</div>
+        </div>
+      </div>
+      <div style="display:flex; gap:6px; align-items:center;">
+        <span class="stop-kind ${s.kind === "bus" ? "kind-bus" : "kind-train"}">${s.kind}</span>
+        <button class="btn" data-route="${s.id}" title="Route from my location to this stop">Route</button>
+      </div>
+    </div>
+  `).join(""));
+  show(elStops);
+
+  // Fill in weather for each stop (cached + limited)
+  await fillStopsWeather(stops);
+  // Wire up route buttons
+  [...elStopsList.querySelectorAll("button[data-route]")].forEach(btn => {
     btn.onclick = async () => {
       if (!myLocation) {
         try {
@@ -232,14 +329,46 @@ out skel qt;
           return;
         }
       }
-      const id = btn.getAttribute("data-stop");
+      const id = btn.getAttribute("data-route");
       const s = stops.find(x => x.id.toString() === id);
       if (!s) return;
       routeBetween(myLocation, s.pos);
     };
   });
+}
 
-  show(elStops);
+async function fillStopsWeather(stops) {
+  // Limit requests: only first 8 will fetch; the rest reuse nearest cached tile
+  const MAX_FETCH = 8;
+  let remaining = MAX_FETCH;
+
+  for (const s of stops) {
+    const key = roundKey(s.pos[0], s.pos[1]);
+    let wx = wxNowCache.get(key);
+    if (!wx && remaining > 0) {
+      try {
+        const w = await getJSON(`https://api.openweathermap.org/data/2.5/weather?lat=${s.pos[0]}&lon=${s.pos[1]}&units=metric&appid=${OWM_KEY}`);
+        wx = {
+          temp: Math.round(w?.main?.temp ?? 0),
+          icon: w?.weather?.[0]?.icon,
+          desc: w?.weather?.[0]?.description || "",
+          name: w?.name, country: w?.sys?.country
+        };
+        wxNowCache.set(key, wx);
+        remaining--;
+      } catch {
+        // ignore
+      }
+    }
+    // Render
+    const el = document.getElementById(`wx-${s.id}`);
+    if (!el) continue;
+    if (wx && wx.icon != null) {
+      el.innerHTML = `<img src="${iconUrl(wx.icon)}" alt="" /><strong>${wx.temp}°C</strong>`;
+    } else {
+      el.innerHTML = `<span class="pill">n/a</span>`;
+    }
+  }
 }
 
 function clearStops() {
@@ -361,7 +490,6 @@ function drawRoute(route) {
   elRouteSummary.textContent = `Distance: ${km(distance)} km • Time: ${minutes(duration)} min`;
   show(elRouteSummary);
 
-  // directions panel
   if (steps && steps.length) {
     setHTML(elDirSteps, steps.map((s, i) => `<div class="dir-step">${i+1}. ${escapeHtml(s)}</div>`).join(""));
     show(elDirections);
@@ -370,7 +498,6 @@ function drawRoute(route) {
   }
 }
 
-// Basic translations for OSRM step to text
 function osrmStepToText(step) {
   const m = step.maneuver || {};
   const type = m.type || "continue";
@@ -389,8 +516,6 @@ function osrmStepToText(step) {
     default: return `Continue${road}${dist}`;
   }
 }
-
-// ORS step to text
 function orsStepToText(step) {
   const name = step.name ? ` onto ${step.name}` : "";
   const dist = step.distance ? ` (${Math.round(step.distance)} m)` : "";
@@ -418,7 +543,6 @@ async function doSearch(q) {
       </button>
     `).join("");
     show(elResults);
-    // wire clicks
     [...elResults.querySelectorAll("button")].forEach(btn => {
       btn.onclick = () => {
         const lat = parseFloat(btn.dataset.lat);
@@ -453,7 +577,3 @@ function getCurrentPosition() {
 }
 
 function showError(msg) { setHTML(elErrors, `⚠️ ${msg}`); show(elErrors); }
-
-function escapeHtml(s="") {
-  return s.replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;");
-}
