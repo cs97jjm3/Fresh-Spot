@@ -27,7 +27,7 @@ window.CONFIG = {
   // BODS / SIRI-VM (optional; browser access often blocked by CORS — leave off unless you proxy)
   BODS: {
     ENABLED: false,
-    API_KEY: ""
+    API_KEY: "4da209fe2ceb2ffa6d73ca9a91968e27535b841c"
     // You will typically consume SIRI-VM via a backend/proxy for CORS & XML parsing.
   },
 
