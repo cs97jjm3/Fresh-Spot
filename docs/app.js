@@ -1,26 +1,40 @@
+/* ===========================
+   FreshStop - app.js (browser)
+   ===========================
+
+   Wires up your HTML:
+   - Geolocate + "Use my location"
+   - Search place (Nominatim) + dropdown
+   - Set Home (persisted) + Home pill
+   - Map click selects a point (selection card + Center button)
+   - Nearby stops list with inline weather + arrivals (via proxy)
+   - "Best stop to get home?" (pulsing marker) + OSRM walking routes
+   - Directions card + Clear
+   - Weather: Open-Meteo (no API key)
+   - BODS arrivals via Cloudflare Worker (CONFIG.PROXY_BASE)
+*/
+
+// ---- Config defaults (override in config.js) ----
 window.CONFIG = Object.assign({
   HOME: { name: "Home", lat: 52.6755, lon: 0.1361 },
   OVERPASS_URL: "https://overpass-api.de/api/interpreter",
   OSRM_URL: "https://router.project-osrm.org",
-  PROXY_BASE: null,
-  SEARCH_RADIUS_M: 800,
+  PROXY_BASE: null,            // e.g. "https://dry-frog-1fcd.murrell-james.workers.dev"
+  SEARCH_RADIUS_M: 800,        // keep in sync with #stops-radius
   MAX_STOPS: 50,
   WALK_SPEED_MPS: 1.3
 }, window.CONFIG || {});
 
-// ---- Tiny helpers ----
-const el = sel => document.querySelector(sel);
+// ---- Helpers ----
+const el  = sel => document.querySelector(sel);
 const els = sel => Array.from(document.querySelectorAll(sel));
 const fmtMins = mins => `${Math.round(mins)} min`;
 const toRad = d => d * Math.PI / 180;
 const toDeg = r => r * 180 / Math.PI;
-const sleep = ms => new Promise(r => setTimeout(r, ms));
 function debounce(fn, wait=300){ let t; return (...a)=>{ clearTimeout(t); t=setTimeout(()=>fn(...a), wait);} }
-
 function haversineMeters(a, b) {
   const R = 6371000;
-  const dLat = toRad(b.lat - a.lat);
-  const dLon = toRad(b.lon - a.lon);
+  const dLat = toRad(b.lat - a.lat), dLon = toRad(b.lon - a.lon);
   const la1 = toRad(a.lat), la2 = toRad(b.lat);
   const s = Math.sin(dLat/2)**2 + Math.cos(la1)*Math.cos(la2)*Math.sin(dLon/2)**2;
   return 2 * R * Math.asin(Math.sqrt(s));
@@ -30,61 +44,56 @@ function bearingDeg(from, to) {
   const λ1 = toRad(from.lon), λ2 = toRad(to.lon);
   const y = Math.sin(λ2 - λ1) * Math.cos(φ2);
   const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(λ2 - λ1);
-  let brng = toDeg(Math.atan2(y, x));
-  return (brng + 360) % 360;
+  return (toDeg(Math.atan2(y, x)) + 360) % 360;
 }
-function angleDiff(a, b) {
-  let d = Math.abs(a - b) % 360;
-  return d > 180 ? 360 - d : d;
-}
+function angleDiff(a, b) { let d = Math.abs(a - b) % 360; return d > 180 ? 360 - d : d; }
 function showError(msg){
-  const box = el('#errors'); if(!box) return;
-  box.style.display='block'; box.textContent = msg;
+  const box = el('#errors'); if (!box) return;
+  box.style.display = 'block'; box.textContent = msg;
   setTimeout(()=>{ box.style.display='none'; }, 6000);
 }
 
-// ---- Leaflet map ----
-let map, userMarker, homeMarker, routeLayer, stopsLayer, bestPulsePin;
+// ---- Map / State ----
+let map, userMarker, homeMarker, stopsLayer, routeLayer, bestPulsePin;
 let currentSelection = null; // {lat, lon, label?}
 let home = {...CONFIG.HOME};
 
-function initMap(center) {
+function initMap(center){
   if (map) return;
   map = L.map('map').setView([center.lat, center.lon], 15);
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 19, attribution: '&copy; OpenStreetMap'
   }).addTo(map);
 
-  homeMarker = L.marker([home.lat, home.lon], { title: 'Home' }).addTo(map).bindPopup('Home');
+  homeMarker = L.marker([home.lat, home.lon], { title: 'Home' })
+    .addTo(map).bindPopup('Home');
   stopsLayer = L.layerGroup().addTo(map);
   routeLayer = L.layerGroup().addTo(map);
 
   // Click-to-select
   map.on('click', async (e) => {
-    const { lat, lng } = e.latlng;
+    const {lat, lng} = e.latlng;
     currentSelection = { lat, lon: lng, label: 'Selected point' };
     map.setView([lat, lng], Math.max(map.getZoom(), 15));
     await refreshSelection();
-    await listNearbyStops(); // repaint stops for this selection
+    await listNearbyStops();
   });
 }
 
 // ---- Weather (Open-Meteo) ----
-async function getWeather(lat, lon) {
+async function getWeather(lat, lon){
   const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current_weather=true&hourly=temperature_2m,precipitation_probability,weathercode,wind_speed_10m&timezone=auto`;
   const r = await fetch(url);
-  if (!r.ok) throw new Error(`Open-Meteo failed: ${r.status}`);
+  if (!r.ok) throw new Error(`Open-Meteo failed ${r.status}`);
   const j = await r.json();
 
   const W = {
-    0:{label:"Clear",icon:"☀️"},1:{label:"Mainly clear",icon:"🌤️"},
-    2:{label:"Partly cloudy",icon:"⛅"},3:{label:"Overcast",icon:"☁️"},
+    0:{label:"Clear",icon:"☀️"},1:{label:"Mainly clear",icon:"🌤️"},2:{label:"Partly cloudy",icon:"⛅"},3:{label:"Overcast",icon:"☁️"},
     45:{label:"Fog",icon:"🌫️"},48:{label:"Rime fog",icon:"🌫️"},
     51:{label:"Drizzle light",icon:"🌦️"},53:{label:"Drizzle",icon:"🌦️"},55:{label:"Drizzle heavy",icon:"🌧️"},
     61:{label:"Rain light",icon:"🌦️"},63:{label:"Rain",icon:"🌧️"},65:{label:"Rain heavy",icon:"🌧️"},
     66:{label:"Freezing rain light",icon:"❄️"},67:{label:"Freezing rain",icon:"❄️"},
     71:{label:"Snow light",icon:"🌨️"},73:{label:"Snow",icon:"🌨️"},75:{label:"Snow heavy",icon:"❄️"},
-    77:{label:"Snow grains",icon:"🌨️"},
     80:{label:"Showers light",icon:"🌦️"},81:{label:"Showers",icon:"🌧️"},82:{label:"Showers heavy",icon:"🌧️"},
     85:{label:"Snow showers",icon:"🌨️"},86:{label:"Snow showers heavy",icon:"❄️"},
     95:{label:"Thunderstorm",icon:"⛈️"},96:{label:"Storm w/ hail",icon:"⛈️"},99:{label:"Severe storm",icon:"⛈️"}
@@ -101,19 +110,18 @@ async function getWeather(lat, lon) {
         time: j.hourly.time[i],
         temp: j.hourly.temperature_2m[i],
         pop: j.hourly.precipitation_probability?.[i] ?? null,
-        wind: j.hourly.wind_speed_10m?.[i] ?? null,
         ...(W[code] || {label:"—",icon:"🌡️"})
       });
     }
   }
   const nowMeta = W[now.weathercode] || {label:"—",icon:"🌡️"};
-  return { now: { time: now.time, temp: now.temperature, wind: now.windspeed, ...nowMeta }, next3 };
+  return { now: { time: now.time, temp: now.temperature, ...nowMeta }, next3 };
 }
 
-async function renderWeather(el, lat, lon) {
+async function renderWeather(container, lat, lon){
   try {
     const w = await getWeather(lat, lon);
-    el.innerHTML = `
+    container.innerHTML = `
       <div class="stop-wx">
         <span>${w.now.icon}</span>
         <span><strong>${w.now.temp}°C</strong> • ${w.now.label}</span>
@@ -122,13 +130,13 @@ async function renderWeather(el, lat, lon) {
         Next 3h: ${w.next3.map(h=>`${new Date(h.time).toLocaleTimeString([], {hour:'2-digit'})} ${Math.round(h.temp)}°${h.pop!=null?` ${h.pop}%`:''}`).join(' · ')}
       </div>
     `;
-  } catch(e) {
-    el.textContent = "Weather unavailable.";
+  } catch {
+    container.textContent = "Weather unavailable.";
   }
 }
 
-// ---- Overpass: nearby bus stops ----
-async function fetchStopsAround(lat, lon, radiusM=CONFIG.SEARCH_RADIUS_M) {
+// ---- Overpass (nearby bus stops) ----
+async function fetchStopsAround(lat, lon, radiusM=CONFIG.SEARCH_RADIUS_M){
   const q = `
     [out:json][timeout:25];
     (
@@ -142,7 +150,7 @@ async function fetchStopsAround(lat, lon, radiusM=CONFIG.SEARCH_RADIUS_M) {
     headers: {"Content-Type":"application/x-www-form-urlencoded;charset=UTF-8"},
     body: "data=" + encodeURIComponent(q)
   });
-  if (!r.ok) throw new Error(`Overpass failed: ${r.status}`);
+  if (!r.ok) throw new Error(`Overpass failed ${r.status}`);
   const j = await r.json();
   return (j.elements || []).map(n => ({
     id: n.id,
@@ -153,7 +161,7 @@ async function fetchStopsAround(lat, lon, radiusM=CONFIG.SEARCH_RADIUS_M) {
 }
 
 // ---- Choose best boarding stop towards home + best alighting stop near home ----
-function chooseStopsTowardsHome(origin, stops, home) {
+function chooseStopsTowardsHome(origin, stops, home){
   if (!stops.length) return null;
   const homeBrng = bearingDeg(origin, home);
   const board = stops
@@ -166,39 +174,59 @@ function chooseStopsTowardsHome(origin, stops, home) {
 }
 
 // ---- OSRM walking routes ----
-async function getWalkRoute(from, to) {
+async function getWalkRoute(from, to){
   const url = `${CONFIG.OSRM_URL}/route/v1/foot/${from.lon},${from.lat};${to.lon},${to.lat}?overview=full&geometries=geojson&steps=false`;
   const r = await fetch(url);
-  if (!r.ok) throw new Error(`OSRM failed: ${r.status}`);
+  if (!r.ok) throw new Error(`OSRM failed ${r.status}`);
   const j = await r.json();
   const route = j.routes?.[0];
   if (!route) throw new Error("No route");
   return { geojson: route.geometry, distance_m: route.distance, duration_s: route.duration };
 }
+function clearRoute(){ routeLayer.clearLayers(); }
+function drawGeoJSON(geojson, style={}) {
+  const layer = L.geoJSON(geojson, Object.assign({ weight: 5, opacity: 0.85 }, style));
+  routeLayer.addLayer(layer);
+  return layer;
+}
+function writeDirections(stepsHTML){
+  const card = el('#directions'); if (!card) return;
+  el('#directions-steps').innerHTML = stepsHTML || '';
+  card.style.display = stepsHTML ? 'block' : 'none';
+}
+function writeWalkSummary(originToStop, stopToHome, board, alight){
+  const steps = [];
+  if (board) steps.push(`<div class="dir-step"><strong>Board at:</strong> ${board.name}</div>`);
+  if (originToStop) steps.push(`<div class="dir-step">Walk to stop: ${fmtMins(originToStop.duration_s/60)}</div>`);
+  if (alight) steps.push(`<div class="dir-step"><strong>Alight at:</strong> ${alight.name}</div>`);
+  if (stopToHome) steps.push(`<div class="dir-step">Walk home: ${fmtMins(stopToHome.duration_s/60)}</div>`);
+  steps.push(`<div class="muted" style="font-size:12px;">Note: bus travel time not included.</div>`);
+  writeDirections(steps.join(""));
+}
 
-// ---- BODS arrivals via your proxy (handles NDJSON + JSON) ----
-function parseNdjson(text) {
+// ---- Arrivals (BODS via Cloudflare Worker) ----
+function parseNdjson(text){
   const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
   const out = [];
   for (const l of lines) {
     if (!l.startsWith("{")) continue;
-    try { out.push(JSON.parse(l)); } catch { /* skip */ }
-    if (out.length >= 50) break;
+    try { out.push(JSON.parse(l)); } catch {}
+    if (out.length >= 100) break;
   }
   return out;
 }
-function normalizeArrivals(arr) {
+function normalizeArrivals(arr){
   return arr.map(x => ({
     line: x.lineName || x.line || x.service || x.operatorRef || "Bus",
     destination: x.destination || x.destinationName || x.direction || "—",
     eta: x.eta || x.expectedArrival || x.aimedArrivalTime || x.bestDepartureEstimate || x.arrivalTime || "—"
   }));
 }
-async function bodsArrivalsViaProxy(bbox) {
+async function bodsArrivalsViaProxy(bbox){
   if (!CONFIG.PROXY_BASE) throw new Error("No proxy configured");
   const url = `${CONFIG.PROXY_BASE}/bods?bbox=${encodeURIComponent(bbox)}`;
   const r = await fetch(url, { cache: "no-store" });
-  if (!r.ok) throw new Error(`BODS via proxy failed: ${r.status}`);
+  if (!r.ok) throw new Error(`BODS via proxy failed ${r.status}`);
   const ct = (r.headers.get("content-type") || "").toLowerCase();
   if (ct.includes("application/json")) {
     const j = await r.json();
@@ -206,11 +234,10 @@ async function bodsArrivalsViaProxy(bbox) {
     return normalizeArrivals(items);
   } else {
     const txt = await r.text();
-    const items = parseNdjson(txt);
-    return normalizeArrivals(items);
+    return normalizeArrivals(parseNdjson(txt));
   }
 }
-async function safeArrivalsHTML(center) {
+async function safeArrivalsHTML(center){
   if (!CONFIG.PROXY_BASE) {
     return `<em>Live arrivals require a proxy. Add <code>CONFIG.PROXY_BASE</code> to enable.</em>`;
   }
@@ -223,14 +250,13 @@ async function safeArrivalsHTML(center) {
       `<li><strong>${x.line}</strong> → ${x.destination} • ${x.eta}</li>`
     ).join("");
     return `<ul class="arrivals">${li}</ul>`;
-  } catch (e) {
-    console.warn("Arrivals failed:", e);
+  } catch {
     return `<em>Arrivals temporarily unavailable.</em>`;
   }
 }
 
 // ---- Popup UI for map markers ----
-function popupTemplate(stop) {
+function popupTemplate(stop){
   return `
     <div class="popup">
       <div><strong>${stop.name}</strong>${stop.ref ? ` <small>(${stop.ref})</small>`:''}</div>
@@ -239,7 +265,7 @@ function popupTemplate(stop) {
     </div>
   `;
 }
-async function enhanceStopPopup(marker, stop) {
+async function enhanceStopPopup(marker, stop){
   const p = marker.getPopup(); if (!p) return;
   const root = p.getElement(); if (!root) return;
   const wEl = root.querySelector('.weather');
@@ -248,34 +274,12 @@ async function enhanceStopPopup(marker, stop) {
   if (aEl) aEl.innerHTML = await safeArrivalsHTML({ lat: stop.lat, lon: stop.lon });
 }
 
-// ---- Route draw + summary + directions panel ----
-function clearRoute(){ routeLayer.clearLayers(); }
-function drawGeoJSON(geojson, style={}) {
-  const layer = L.geoJSON(geojson, Object.assign({ weight: 5, opacity: 0.85 }, style));
-  routeLayer.addLayer(layer);
-  return layer;
-}
-function writeDirections(stepsHTML){
-  const card = el('#directions'); if (!card) return;
-  el('#directions-steps').innerHTML = stepsHTML || '';
-  card.style.display = stepsHTML ? 'block' : 'none';
-}
-function writeWalkSummary(originToStop, stopToHome, board, alight) {
-  const steps = [];
-  if (board) steps.push(`<div class="dir-step"><strong>Board at:</strong> ${board.name}</div>`);
-  if (originToStop) steps.push(`<div class="dir-step">Walk to stop: ${fmtMins(originToStop.duration_s/60)}</div>`);
-  if (alight) steps.push(`<div class="dir-step"><strong>Alight at:</strong> ${alight.name}</div>`);
-  if (stopToHome) steps.push(`<div class="dir-step">Walk home: ${fmtMins(stopToHome.duration_s/60)}</div>`);
-  steps.push(`<div class="muted" style="font-size:12px;">Note: bus travel time not included.</div>`);
-  writeDirections(steps.join(""));
-}
-
-// ---- UI wiring: selection, stops list, search, home ----
+// ---- Selection card + Stops list ----
 async function refreshSelection(){
   const card = el('#selection'); if (!card) return;
   if (!currentSelection) { card.style.display='none'; card.innerHTML=''; return; }
   const { lat, lon, label } = currentSelection;
-  card.style.display='block';
+  card.style.display = 'block';
   card.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;">
       <div>
@@ -297,15 +301,16 @@ async function listNearbyStops(){
   if (radiusEl) radiusEl.textContent = CONFIG.SEARCH_RADIUS_M.toString();
 
   let stops=[];
-  try {
-    stops = await fetchStopsAround(center.lat, center.lon);
-  } catch(e){ showError("Couldn’t load stops."); }
+  try { stops = await fetchStopsAround(center.lat, center.lon); }
+  catch { showError("Couldn’t load stops."); }
 
   stopsLayer.clearLayers();
   listEl.innerHTML = '';
 
   for (const s of stops) {
-    const m = L.marker([s.lat, s.lon], { title: s.name }).addTo(stopsLayer).bindPopup(popupTemplate(s));
+    const m = L.marker([s.lat, s.lon], { title: s.name })
+      .addTo(stopsLayer)
+      .bindPopup(popupTemplate(s));
     m.on('popupopen', () => enhanceStopPopup(m, s));
 
     const item = document.createElement('div');
@@ -320,10 +325,9 @@ async function listNearbyStops(){
     `;
     listEl.appendChild(item);
 
-    // Inline weather + tiny arrivals summary (best-effort)
+    // Inline weather + tiny arrivals summary
     const wxEl = item.querySelector(`#wx-${s.id}`);
     renderWeather(wxEl, s.lat, s.lon).catch(()=>{});
-    // For arrivals, keep it light: just one small list under the item
     const arrDiv = document.createElement('div');
     arrDiv.className = 'muted';
     arrDiv.style.fontSize = '12px';
@@ -335,21 +339,17 @@ async function listNearbyStops(){
   return stops;
 }
 
-// Search (Nominatim)
-async function geocode(text) {
+// ---- Search (Nominatim) + Set Home ----
+async function geocode(text){
   const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(text)}&addressdetails=1&limit=5`;
   const r = await fetch(url, { headers: { 'Accept': 'application/json' }});
   if (!r.ok) throw new Error('Search failed');
   const j = await r.json();
-  return j.map(x => ({
-    lat: parseFloat(x.lat),
-    lon: parseFloat(x.lon),
-    label: x.display_name
-  }));
+  return j.map(x => ({ lat: parseFloat(x.lat), lon: parseFloat(x.lon), label: x.display_name }));
 }
 function wireSearchBoxes(){
-  const search = el('#search'); const drop = el('#results');
-  const homeInput = el('#home-input'); const homeDrop = el('#home-results');
+  const search = el('#search'), drop = el('#results');
+  const homeInput = el('#home-input'), homeDrop = el('#home-results');
 
   const renderDrop = (root, items, onclick) => {
     if (!items.length) { root.style.display='none'; root.innerHTML=''; return; }
@@ -373,7 +373,7 @@ function wireSearchBoxes(){
           await refreshSelection();
           await listNearbyStops();
         });
-      } catch (e) { showError('Search failed.'); }
+      } catch { showError('Search failed.'); }
     }, 350));
   }
 
@@ -388,12 +388,12 @@ function wireSearchBoxes(){
           setHome({ name: pick.label, lat: pick.lat, lon: pick.lon });
           await listNearbyStops();
         });
-      } catch (e) { showError('Home search failed.'); }
+      } catch { showError('Home search failed.'); }
     }, 350));
   }
 }
 
-// Home persistence + pill
+// ---- Home persistence + pill ----
 function setHome(h){
   home = { name: h.name || 'Home', lat: h.lat, lon: h.lon };
   localStorage.setItem('freshstop.home', JSON.stringify(home));
@@ -409,14 +409,12 @@ function updateHomeUI(){
   if (pill) {
     pill.textContent = `🏠 ${home.name.split(',')[0]} (${home.lat.toFixed(3)}, ${home.lon.toFixed(3)})`;
     pill.style.display = 'inline-block';
-    pill.onclick = ()=>{ // click pill to change Home (focus input)
-      if (input) { input.value=''; input.focus(); }
-    };
+    pill.onclick = ()=>{ if (input) { input.value=''; input.focus(); } };
   }
   if (homeMarker) homeMarker.setLatLng([home.lat, home.lon]).setPopupContent('Home');
 }
 
-// Buttons
+// ---- Buttons ----
 function wireButtons(){
   const btnLoc = el('#btn-my-location');
   if (btnLoc) btnLoc.onclick = async ()=>{
@@ -435,7 +433,7 @@ function wireButtons(){
       else userMarker.setLatLng([pos.lat, pos.lon]);
       await refreshSelection();
       await listNearbyStops();
-    } catch(e){ showError('Could not get your location.'); }
+    } catch { showError('Could not get your location.'); }
   };
 
   const btnBest = el('#btn-best-stop'), bestLabel = el('#best-label');
@@ -443,7 +441,7 @@ function wireButtons(){
     const origin = currentSelection || (userMarker ? { lat:userMarker.getLatLng().lat, lon:userMarker.getLatLng().lng } : home);
     let stops=[];
     try { stops = await fetchStopsAround(origin.lat, origin.lon); }
-    catch(e){ showError('No stops found.'); return; }
+    catch { showError('No stops found.'); return; }
     const pair = chooseStopsTowardsHome(origin, stops, home);
     if (!pair) { showError('No suitable stops.'); return; }
     const { board, alight } = pair;
@@ -453,15 +451,17 @@ function wireButtons(){
     bestPulsePin = L.marker([board.lat, board.lon], {
       icon: L.divIcon({ className: '', html: '<div class="pulse-pin"></div>', iconSize: [18,18], iconAnchor: [9,9] })
     }).addTo(map);
-    bestLabel.style.display = 'inline-block';
-    setTimeout(()=> bestLabel.style.display='none', 6000);
+    if (bestLabel) {
+      bestLabel.style.display = 'inline-block';
+      setTimeout(()=> bestLabel.style.display='none', 6000);
+    }
 
     // Routes
     clearRoute();
-    try { const w1 = await getWalkRoute(origin, board); drawGeoJSON(w1.geojson, { color:'#2a9d8f' });
-          const w2 = await getWalkRoute(alight, home); drawGeoJSON(w2.geojson, { color:'#e76f51' });
-          writeWalkSummary(w1, w2, board, alight);
-    } catch(e){ writeWalkSummary(null, null, board, alight); }
+    let w1=null, w2=null;
+    try { w1 = await getWalkRoute(origin, board); drawGeoJSON(w1.geojson, { color:'#2a9d8f' }); } catch {}
+    try { w2 = await getWalkRoute(alight, home); drawGeoJSON(w2.geojson, { color:'#e76f51' }); } catch {}
+    writeWalkSummary(w1, w2, board, alight);
 
     map.setView([board.lat, board.lon], 16);
   };
@@ -475,18 +475,17 @@ function wireButtons(){
 }
 
 // ---- MAIN ----
-// ---- MAIN ----
 async function main(){
   loadHome();
   initMap(home);
   updateHomeUI();
 
-  // Put Home in selection initially to populate sidebars
+  // Put Home in selection initially
   currentSelection = { lat: home.lat, lon: home.lon, label: home.name };
   await refreshSelection();
   await listNearbyStops();
 
-  // Try auto locate silently (doesn't error if blocked)
+  // Try geolocate silently
   try {
     const pos = await new Promise((res, rej)=>{
       if (!navigator.geolocation) return rej(new Error("No geolocation"));
@@ -506,13 +505,11 @@ async function main(){
     }
     await refreshSelection();
     await listNearbyStops();
-  } catch(_){
-    // ignore if user blocks geolocation
-  }
+  } catch { /* ignore if blocked */ }
 
   wireButtons();
   wireSearchBoxes();
 }
 
-// ---- Start up ----
+// ---- Start ----
 document.addEventListener('DOMContentLoaded', main);
