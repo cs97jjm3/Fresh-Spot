@@ -1,12 +1,12 @@
 // ======= Config & guards =======
 const CONFIG = (window.FRESHSTOP_CONFIG || {});
-const OWM_KEY = CONFIG.OWM_KEY;
-const ORS_KEY = CONFIG.ORS_KEY;
-const TP_APP_ID  = CONFIG.TP_APP_ID;  // TransportAPI (optional for live times)
-const TP_APP_KEY = CONFIG.TP_APP_KEY; // TransportAPI (optional)
+const OWM_KEY    = CONFIG.OWM_KEY;
+const ORS_KEY    = CONFIG.ORS_KEY;
+const TP_APP_ID  = CONFIG.TP_APP_ID;   // optional for live times
+const TP_APP_KEY = CONFIG.TP_APP_KEY;  // optional
 
 if (!OWM_KEY) {
-  console.warn("Missing OWM_KEY. Create config.js with window.FRESHSTOP_CONFIG. See instructions.");
+  console.warn("Missing OWM_KEY. Create config.js with window.FRESHSTOP_CONFIG.");
 }
 
 // ======= Elements =======
@@ -32,12 +32,12 @@ const elRFMy = document.getElementById("rf-myloc");
 const elRFSel = document.getElementById("rf-selected");
 
 // Home controls (search-like)
-const elHomeInput   = document.getElementById("home-input");
-const elHomeResults = document.getElementById("home-results");
-const elHomePill    = document.getElementById("home-pill");
-const elHomeEdit    = document.getElementById("home-edit");
-const elHomeOnlyWrap= document.getElementById("home-only-wrap");
-const elHomeOnly    = document.getElementById("home-only");
+const elHomeInput    = document.getElementById("home-input");
+const elHomeResults  = document.getElementById("home-results");
+const elHomePill     = document.getElementById("home-pill");
+const elHomeEdit     = document.getElementById("home-edit");
+const elHomeOnlyWrap = document.getElementById("home-only-wrap");
+const elHomeOnly     = document.getElementById("home-only");
 
 // ======= Map setup =======
 const map = L.map("map");
@@ -52,8 +52,8 @@ let selectedMarker = null;
 let routeLine = null;
 let stopLayers = [];
 
-const wxNowCache = new Map();  // key: "lat,lon" ~ tile -> { temp, icon }
-const hourlyCache = new Map(); // key: tile -> [{ts,t,icon,tz},...]
+const wxNowCache = new Map();   // tile -> {temp, icon}
+const hourlyCache = new Map();  // tile -> [{ts,t,icon,tz}...]
 
 // ======= Units: miles & mph =======
 function miles(meters) { return (meters / 1609.344).toFixed(2); }
@@ -114,7 +114,6 @@ if ("geolocation" in navigator) {
 function show(el){ if(el) el.style.display=""; }
 function hide(el){ if(el) el.style.display="none"; }
 function setHTML(el,h){ if(el) el.innerHTML=h; }
-function km(m){ return (m/1000).toFixed(2); } // retained if ever needed
 function minutes(s){ return Math.round(s/60); }
 function roundKey(lat,lon){ return `${lat.toFixed(2)},${lon.toFixed(2)}`; }
 function escapeHtml(s=""){ return s.replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;"); }
@@ -131,7 +130,7 @@ async function getOrigin(){
   L.circle(myLocation,{radius:6,color:"#0ea5e9",fillColor:"#0ea5e9",fillOpacity:0.7}).addTo(map); return myLocation;
 }
 
-// Remove all stop markers from the map
+// Remove all stop markers
 function clearStops() {
   for (const layer of stopLayers) {
     try { layer.remove(); } catch {}
@@ -179,23 +178,30 @@ async function setSelected([lat,lng],source=""){
 async function loadWeatherAndForecast(lat,lng){
   if(!OWM_KEY) throw new Error("Missing OpenWeatherMap key.");
 
-  const wx=await getJSON(`https://api.openweathermap.org/data/2.5/weather?lat=${lat}&lon=${lng}&units=metric&appid=${OWM_KEY}`);
-  const t=Math.round(wx?.main?.temp??0);
-  const feels=Math.round(wx?.main?.feels_like??0);
-  const windMs=(wx?.wind?.speed??0);
-  const wind = mph(windMs); // mph
-  const desc=(wx?.weather?.[0]?.description||"").replace(/^\w/,c=>c.toUpperCase());
-  const place=[wx?.name,wx?.sys?.country].filter(Boolean).join(", ");
-  const icon=wx?.weather?.[0]?.icon;
-
-  wxNowCache.set(roundKey(lat,lng),{temp:t,icon});
+  let t = 0, feels = 0, wind = 0, desc = "", place = "", icon = "";
+  try {
+    const wx=await getJSON(`https://api.openweathermap.org/data/2.5/weather?lat=${lat}&lon=${lng}&units=metric&appid=${OWM_KEY}`);
+    t=Math.round(wx?.main?.temp??0);
+    feels=Math.round(wx?.main?.feels_like??0);
+    wind = mph(wx?.wind?.speed??0);
+    desc=(wx?.weather?.[0]?.description||"").replace(/^\w/,c=>c.toUpperCase());
+    place=[wx?.name,wx?.sys?.country].filter(Boolean).join(", ");
+    icon=wx?.weather?.[0]?.icon;
+    wxNowCache.set(roundKey(lat,lng),{temp:t,icon});
+  } catch (e) {
+    setHTML(elWeather, `<div class="muted">Weather unavailable • ${escapeHtml(e.message||"")}</div>`);
+    show(elWeather);
+    return;
+  }
 
   let hours=[];
   try {
     const one=await getJSON(`https://api.openweathermap.org/data/3.0/onecall?lat=${lat}&lon=${lng}&exclude=minutely,daily,alerts&units=metric&appid=${OWM_KEY}`);
     const tz = one?.timezone_offset || 0;
     hours=(one?.hourly||[]).slice(0,3).map(h=>({ts:h.dt,t:Math.round(h.temp),icon:h.weather?.[0]?.icon,tz}));
-  } catch {}
+  } catch {
+    // ok to skip hourly
+  }
 
   setHTML(elWeather, `
     <div class="wx-top">
@@ -227,63 +233,118 @@ function aqiClass(n){switch(n){case 1:return["Good","aqi-good"];case 2:return["F
 function pct(value,max){return Math.max(0,Math.min(100,Math.round((value/max)*100)));}
 async function loadAir(lat,lng){
   if(!OWM_KEY) throw new Error("Missing OpenWeatherMap key.");
-  const air=await getJSON(`https://api.openweathermap.org/data/2.5/air_pollution?lat=${lat}&lon=${lng}&appid=${OWM_KEY}`);
-  const main=air?.list?.[0]?.main||{}, comp=air?.list?.[0]?.components||{};
-  const [label,cls]=aqiClass(main.aqi||0);
-  const scales={pm2_5:75,pm10:150,no2:200,o3:180};
+  try {
+    const air=await getJSON(`https://api.openweathermap.org/data/2.5/air_pollution?lat=${lat}&lon=${lng}&appid=${OWM_KEY}`);
+    const main=air?.list?.[0]?.main||{}, comp=air?.list?.[0]?.components||{};
+    const [label,cls]=aqiClass(main.aqi||0);
+    const scales={pm2_5:75,pm10:150,no2:200,o3:180};
 
-  setHTML(elAir, `
-    <div style="display:flex; align-items:center; justify-content:space-between;">
-      <div>
-        <div style="font-weight:700; margin-bottom:4px;">Air quality</div>
-        <div class="muted" style="font-size:12px;">OpenWeatherMap AQI (1–5)</div>
+    setHTML(elAir, `
+      <div style="display:flex; align-items:center; justify-content:space-between;">
+        <div>
+          <div style="font-weight:700; margin-bottom:4px;">Air quality</div>
+          <div class="muted" style="font-size:12px;">OpenWeatherMap AQI (1–5)</div>
+        </div>
+        <div class="aqi-badge ${cls}">AQI ${main.aqi ?? "?"} • ${label}</div>
       </div>
-      <div class="aqi-badge ${cls}">AQI ${main.aqi ?? "?"} • ${label}</div>
-    </div>
 
-    <div style="margin-top:10px; display:grid; gap:10px;">
-      ${["pm2_5","pm10","no2","o3"].map(k=>{
-        const v=comp[k]; const percentage=pct(v??0, scales[k]);
-        return `
-          <div>
-            <div class="kv"><span>${k.toUpperCase()}</span><span>${v!=null?v:"—"} μg/m³</span></div>
-            <div class="bar"><span style="width:${percentage}%;"></span></div>
-          </div>
-        `;
-      }).join("")}
-    </div>
-  `);
+      <div style="margin-top:10px; display:grid; gap:10px;">
+        ${["pm2_5","pm10","no2","o3"].map(k=>{
+          const v=comp[k]; const percentage=pct(v??0, scales[k]);
+          return `
+            <div>
+              <div class="kv"><span>${k.toUpperCase()}</span><span>${v!=null?v:"—"} μg/m³</span></div>
+              <div class="bar"><span style="width:${percentage}%;"></span></div>
+            </div>
+          `;
+        }).join("")}
+      </div>
+    `);
+  } catch (e) {
+    setHTML(elAir, `<div class="muted">Air quality unavailable • ${escapeHtml(e.message||"")}</div>`);
+  }
   show(elAir);
 }
 
-// ======= Overpass helpers =======
+// ======= Overpass: rotation, chunking, soft-fail =======
+const OVERPASS_URLS = [
+  "https://overpass-api.de/api/interpreter",
+  "https://overpass.kumi.systems/api/interpreter",
+  "https://overpass.openstreetmap.ru/api/interpreter"
+];
+
 async function overpass(query){
-  const res = await fetch("https://overpass-api.de/api/interpreter", {
-    method: "POST",
-    headers: {"Content-Type":"application/x-www-form-urlencoded"},
-    body: new URLSearchParams({ data: query })
-  });
-  if (!res.ok) throw new Error("Overpass busy/unavailable");
-  return await res.json();
+  for (const url of OVERPASS_URLS) {
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {"Content-Type":"application/x-www-form-urlencoded"},
+        body: new URLSearchParams({ data: query })
+      });
+      if (!res.ok) continue;
+      return await res.json();
+    } catch { /* try next */ }
+  }
+  throw new Error("Overpass busy/unavailable");
 }
+
 async function fetchStopRoutes(nodeId){
   const q = `
-[out:json][timeout:25];
+[out:json][timeout:30];
 node(${nodeId});
 rel(bn)->.r;
 .r[route~"bus|tram|train|subway|light_rail"] out tags;
 `.trim();
-  const res = await fetch("https://overpass-api.de/api/interpreter", {
-    method: "POST",
-    headers: {"Content-Type":"application/x-www-form-urlencoded"},
-    body: new URLSearchParams({ data: q })
-  });
-  if (!res.ok) throw new Error("Overpass error");
-  const json = await res.json();
-  return (json.elements || []).filter(e => e.type === "relation");
+  for (const url of OVERPASS_URLS) {
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {"Content-Type":"application/x-www-form-urlencoded"},
+        body: new URLSearchParams({ data: q })
+      });
+      if (!res.ok) continue;
+      const json = await res.json();
+      return (json.elements || []).filter(e => e.type === "relation");
+    } catch {}
+  }
+  return []; // soft-fail
 }
 
-// Read route relations that serve a stop and return short labels
+// Read route relations serving MANY nodes (chunked)
+async function fetchRouteRelationsByNodes(nodeIds) {
+  if (!nodeIds.length) return [];
+  const CHUNK = 40;
+  const all = [];
+  for (let i = 0; i < nodeIds.length; i += CHUNK) {
+    const part = nodeIds.slice(i, i + CHUNK);
+    const idList = part.join(",");
+    const q = `
+[out:json][timeout:30];
+node(id:${idList});
+rel(bn)->.r;
+.r[route~"bus|tram|train|subway|light_rail"] out tags;
+`.trim();
+    let ok = false;
+    for (const url of OVERPASS_URLS) {
+      try {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: {"Content-Type":"application/x-www-form-urlencoded"},
+          body: new URLSearchParams({ data: q })
+        });
+        if (!res.ok) continue;
+        const json = await res.json();
+        all.push(...(json.elements || []).filter(e => e.type === "relation"));
+        ok = true;
+        break;
+      } catch {}
+    }
+    if (!ok) { /* skip this chunk softly */ }
+  }
+  return all;
+}
+
+// Read route labels for one stop (short strings)
 async function getStopRouteLabels(nodeId) {
   const rels = await fetchStopRoutes(nodeId);
   const labels = rels.map(r => {
@@ -293,7 +354,7 @@ async function getStopRouteLabels(nodeId) {
   return [...new Set(labels)].sort((a, b) => a.length - b.length).slice(0, 8);
 }
 
-// Home vicinity stops (for route intersection)
+// Home vicinity stops (soft, capped)
 async function fetchHomeAreaStops(home, radiusMeters = 600) {
   const q = `
 [out:json][timeout:25];
@@ -302,57 +363,48 @@ async function fetchHomeAreaStops(home, radiusMeters = 600) {
   node(around:${radiusMeters},${home.lat},${home.lon})["public_transport"="platform"]["bus"="yes"];
   node(around:${radiusMeters},${home.lat},${home.lon})["railway"~"^(station|halt|stop|tram_stop)$"];
 );
-out body;
->;
-out skel qt;
+out body 20;
 `.trim();
-  const res = await fetch("https://overpass-api.de/api/interpreter", {
-    method: "POST",
-    headers: {"Content-Type":"application/x-www-form-urlencoded"},
-    body: new URLSearchParams({ data: q })
-  });
-  if (!res.ok) throw new Error("Overpass home-stops error");
-  const json = await res.json();
-  return (json.elements || []).filter(e => e.type === "node");
-}
-async function fetchRouteRelationsByNodes(nodeIds) {
-  if (!nodeIds.length) return [];
-  const idList = nodeIds.join(",");
-  const q = `
-[out:json][timeout:25];
-node(id:${idList});
-rel(bn)->.r;
-.r[route~"bus|tram|train|subway|light_rail"] out tags;
-`.trim();
-  const res = await fetch("https://overpass-api.de/api/interpreter", {
-    method: "POST",
-    headers: {"Content-Type":"application/x-www-form-urlencoded"},
-    body: new URLSearchParams({ data: q })
-  });
-  if (!res.ok) throw new Error("Overpass route-relations error");
-  const json = await res.json();
-  return (json.elements || []).filter(e => e.type === "relation");
+  for (const url of OVERPASS_URLS) {
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {"Content-Type":"application/x-www-form-urlencoded"},
+        body: new URLSearchParams({ data: q })
+      });
+      if (!res.ok) continue;
+      const json = await res.json();
+      return (json.elements || []).filter(e => e.type === "node");
+    } catch {}
+  }
+  return [];
 }
 
 // Robust: stops whose routes also serve Home area (fallback: name heuristic)
 async function getStopsTowardHomeSet(stopsNearYou, home) {
-  const homeStops = await fetchHomeAreaStops(home, 600);
-  if (!homeStops.length) return await nameHeuristicHomeSet(stopsNearYou, home);
+  try {
+    const homeStops = await fetchHomeAreaStops(home, 600);
+    if (!homeStops.length) return await nameHeuristicHomeSet(stopsNearYou, home);
 
-  const homeRelObjs = await fetchRouteRelationsByNodes(homeStops.map(s => s.id));
-  const homeRelIds = new Set(homeRelObjs.map(r => r.id));
-  if (!homeRelIds.size) return await nameHeuristicHomeSet(stopsNearYou, home);
+    const homeRelObjs = await fetchRouteRelationsByNodes(homeStops.map(s => s.id));
+    const homeRelIds = new Set(homeRelObjs.map(r => r.id));
+    if (!homeRelIds.size) return await nameHeuristicHomeSet(stopsNearYou, home);
 
-  const hitIds = new Set();
-  for (const s of stopsNearYou) {
-    try {
-      const rels = await fetchStopRoutes(s.id);
-      if (rels.some(r => homeRelIds.has(r.id))) hitIds.add(s.id);
-    } catch {}
+    const hitIds = new Set();
+    for (const s of stopsNearYou) {
+      try {
+        const rels = await fetchStopRoutes(s.id);
+        if (rels.some(r => homeRelIds.has(r.id))) hitIds.add(s.id);
+      } catch {}
+    }
+    if (hitIds.size) return hitIds;
+    return await nameHeuristicHomeSet(stopsNearYou, home);
+  } catch {
+    return await nameHeuristicHomeSet(stopsNearYou, home);
   }
-  if (hitIds.size) return hitIds;
-  return await nameHeuristicHomeSet(stopsNearYou, home);
 }
+
+// Fallback name-based heuristic (best effort)
 async function nameHeuristicHomeSet(stops, home) {
   const tokens = (home.label || home.postcode || "")
     .toLowerCase()
@@ -373,7 +425,7 @@ async function nameHeuristicHomeSet(stops, home) {
   return out;
 }
 
-// ======= Stops (with filter to Home, routes, live times) =======
+// ======= Stops (filter to Home, routes, live times) =======
 async function loadStops(lat,lng,radius=800){
   elStopsRadius.textContent = radius;
   const q = `
@@ -388,7 +440,13 @@ out body;
 out skel qt;
 `.trim();
 
-  const data = await overpass(q);
+  let data;
+  try { data = await overpass(q); }
+  catch (e) {
+    setHTML(elStopsList, `<div class="muted">Stops unavailable • ${escapeHtml(e.message||"")}</div>`);
+    show(elStops); return;
+  }
+
   let stops = (data.elements || [])
     .filter(e => e.type === "node")
     .map(e => {
@@ -465,15 +523,13 @@ out skel qt;
   // Per-stop tiny weather
   await fillStopsWeather(stops);
 
-  // Fill per-stop route labels & live times
+  // Per-stop OSM route labels + live times
   for (const s of stops) {
-    // OSM route labels
     getStopRouteLabels(s.id).then(labels => {
       const el = document.getElementById(`routes-${s.id}`);
       if (el && labels.length) el.textContent = `• Routes: ${labels.join(", ")}`;
     }).catch(()=>{});
 
-    // Live bus times (TransportAPI) - only for bus stops with ATCO and keys present
     const liveEl = document.getElementById(`live-${s.id}`);
     if (s.kind === "bus" && s.atco && TP_APP_ID && TP_APP_KEY) {
       fetchLiveBusTimes(s.atco).then(rows => {
@@ -647,7 +703,6 @@ function drawRoute(route){
   if(routeLine) routeLine.remove();
   routeLine=L.polyline(coords,{weight:5}).addTo(map);
   map.fitBounds(L.latLngBounds(coords),{padding:[20,20]});
-  // miles + minutes
   elRouteSummary.textContent=`Distance: ${miles(distance)} mi • Time: ${minutes(duration)} min`;
   show(elRouteSummary);
   if(steps && steps.length){
@@ -660,17 +715,17 @@ function drawRoute(route){
 
 // ======= Search (places) =======
 let searchTimer;
-elSearch.addEventListener("input",()=>{
+elSearch && elSearch.addEventListener("input",()=>{
   clearTimeout(searchTimer);
   const q=elSearch.value.trim();
-  if(q.length<3){ hide(elResults); elResults.innerHTML=""; return; }
+  if(q.length<3){ hide(elResults); elResults && (elResults.innerHTML=""); return; }
   searchTimer=setTimeout(()=>doSearch(q),350);
 });
 async function doSearch(q){
   const url=`https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=6&q=${encodeURIComponent(q)}`;
   try{
     const data=await getJSON(url,{"Accept-Language":"en"});
-    if(!Array.isArray(data)||!data.length){ hide(elResults); elResults.innerHTML=""; return; }
+    if(!Array.isArray(data)||!data.length){ hide(elResults); elResults && (elResults.innerHTML=""); return; }
     elResults.innerHTML=data.map(row=>`
       <button data-lat="${row.lat}" data-lon="${row.lon}">
         ${row.display_name.replaceAll("&","&amp;")}
@@ -688,7 +743,7 @@ async function doSearch(q){
   }catch{ hide(elResults); }
 }
 // close results when clicking outside
-document.addEventListener("click",(e)=>{ if(!elResults.contains(e.target) && e.target!==elSearch) hide(elResults); });
+document.addEventListener("click",(e)=>{ if(elResults && !elResults.contains(e.target) && e.target!==elSearch) hide(elResults); });
 
 // ======= Home autocomplete =======
 let homeTimer;
@@ -699,7 +754,7 @@ if(elHomeInput && elHomeResults){
     if(!q || q.length<3){ elHomeResults.style.display="none"; elHomeResults.innerHTML=""; return; }
     homeTimer=setTimeout(()=>doHomeSearch(q),350);
   });
-  document.addEventListener("click",(e)=>{ if(!elHomeResults.contains(e.target) && e.target!==elHomeInput){ elHomeResults.style.display="none"; } });
+  document.addEventListener("click",(e)=>{ if(elHomeResults && !elHomeResults.contains(e.target) && e.target!==elHomeInput){ elHomeResults.style.display="none"; } });
 }
 async function doHomeSearch(q){
   const url=`https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=6&q=${encodeURIComponent(q)}`;
@@ -726,6 +781,19 @@ async function doHomeSearch(q){
 }
 
 // ======= Generic helpers =======
-async function getJSON(u,h={}){ const r=await fetch(u,{headers:{...h}}); if(!r.ok) throw new Error(`${r.status} ${r.statusText}`); return await r.json(); }
+async function getJSON(u,h={}) {
+  const r = await fetch(u,{headers:{...h}});
+  if (!r.ok) {
+    let msg = `${r.status} ${r.statusText}`;
+    try {
+      const body = await r.json();
+      if (body && (body.message || body.cod)) {
+        msg += ` — ${body.cod || ""} ${body.message || ""}`;
+      }
+    } catch {}
+    throw new Error(msg);
+  }
+  return await r.json();
+}
 function getCurrentPosition(){ return new Promise((resolve,reject)=>{ if(!navigator.geolocation) return reject(new Error("Geolocation unsupported")); navigator.geolocation.getCurrentPosition(resolve,reject,{enableHighAccuracy:true,timeout:10000}); }); }
 function showError(m){ setHTML(elErrors,`⚠️ ${m}`); show(elErrors); }
