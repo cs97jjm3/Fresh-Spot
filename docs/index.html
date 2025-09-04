@@ -120,7 +120,14 @@
       <div class="tag">Better routes for cleaner air</div>
       <div class="search">
         <input id="search" type="text" placeholder="Search a place or postcode…" />
-        <div id="results" class="dropdown" style="display:none;"></div>
+        
+        <div id="results" class="dropdown" style="display:none;">
+
+          <!-- Put inside <header> after the search box -->
+<span id="home-pill" class="pill" style="display:none;"></span>
+<button id="home-clear" class="btn" style="display:none; margin-left:6px;">Clear</button>
+
+        </div>
       </div>
     </header>
 
