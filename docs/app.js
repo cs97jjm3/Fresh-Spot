@@ -395,10 +395,15 @@ function wireSearchBoxes(){
 
 // ---- Home persistence + pill ----
 function setHome(h){
-  home = { name: h.name || 'Home', lat: h.lat, lon: h.lon };
+  home = {
+    name: (h && typeof h.name === 'string' && h.name.trim()) ? h.name : 'Home',
+    lat: Number(h.lat),
+    lon: Number(h.lon)
+  };
   localStorage.setItem('freshstop.home', JSON.stringify(home));
   updateHomeUI();
 }
+
 function loadHome(){
   const raw = localStorage.getItem('freshstop.home');
   if (!raw) return;
@@ -417,14 +422,22 @@ function loadHome(){
 }
 
 function updateHomeUI(){
-  const pill = el('#home-pill'); const input = el('#home-input');
+  const pill = el('#home-pill');
+  const input = el('#home-input');
+
+  const displayName = String(home?.name || 'Home');
+  const first = displayName.split(',')[0];
+
   if (pill) {
-    pill.textContent = `🏠 ${home.name.split(',')[0]} (${home.lat.toFixed(3)}, ${home.lon.toFixed(3)})`;
+    pill.textContent = `🏠 ${first} (${(home?.lat ?? 0).toFixed(3)}, ${(home?.lon ?? 0).toFixed(3)})`;
     pill.style.display = 'inline-block';
-    pill.onclick = ()=>{ if (input) { input.value=''; input.focus(); } };
+    pill.onclick = () => { if (input) { input.value = ''; input.focus(); } };
   }
-  if (homeMarker) homeMarker.setLatLng([home.lat, home.lon]).setPopupContent('Home');
+  if (homeMarker && typeof home?.lat === 'number' && typeof home?.lon === 'number') {
+    homeMarker.setLatLng([home.lat, home.lon]).setPopupContent('Home');
+  }
 }
+
 
 // ---- Buttons ----
 function wireButtons(){
