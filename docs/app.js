@@ -7,71 +7,66 @@
   const OVERPASS_URL = CFG.OVERPASS_URL || "https://overpass-api.de/api/interpreter";
   const SEARCH_RADIUS_METERS = CFG.SEARCH_RADIUS_METERS || 800;
 
-  // -------------- DOM shortcuts --------------
+  // -------------- DOM helpers --------------
   const $ = (s) => document.querySelector(s);
 
-  // Map + layers
+  // -------------- Map ----------------------
   const map = L.map("map", { zoomControl: true }).setView([51.5074, -0.1278], 12);
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
     maxZoom: 19, attribution: "&copy; OpenStreetMap",
   }).addTo(map);
 
-  const routeColor = "#0ea5e9";
-  let routeLayer = null;
-
-  // Icons
+  // -------------- Icons & styles -----------
   const REGULAR_STOP_ICON = L.divIcon({
     className: "",
     html: `<div style="width:18px;height:18px;background:#0ea5e9;border:2px solid #fff;border-radius:50%;box-shadow:0 2px 8px rgba(0,0,0,.25)"></div>`,
-    iconSize: [18, 18],
-    iconAnchor: [9, 9],
+    iconSize: [18, 18], iconAnchor: [9, 9],
   });
   const DEST_ICON = L.divIcon({
     className: "",
     html: `<div style="width:18px;height:18px;background:#ef4444;border:2px solid #fff;border-radius:50%;box-shadow:0 2px 8px rgba(0,0,0,.25)"></div>`,
-    iconSize: [18, 18],
-    iconAnchor: [9, 9],
+    iconSize: [18, 18], iconAnchor: [9, 9],
   });
-
-  // Pulsing suggestion (best stop before selection)
   const BEST_PULSE_ICON = L.divIcon({
     className: "",
     html: `<div style="position:relative;width:18px;height:18px;border-radius:50%;background:#3b82f6;border:2px solid #fff;box-shadow:0 2px 10px rgba(0,0,0,.35)">
       <div style="position:absolute;left:50%;top:50%;width:18px;height:18px;transform:translate(-50%,-50%);border-radius:50%;border:2px solid rgba(59,130,246,.65);animation:pulse 1.6s ease-out infinite"></div>
     </div>`,
-    iconSize: [18, 18],
-    iconAnchor: [9, 9],
+    iconSize: [18, 18], iconAnchor: [9, 9],
   });
-  // Selected best (golden)
   const BEST_SELECTED_ICON = L.divIcon({
     className: "",
     html: `<div style="width:22px;height:22px;background:#f59e0b;border:3px solid #fff;border-radius:50%;box-shadow:0 3px 12px rgba(0,0,0,.35)"></div>`,
-    iconSize: [22, 22],
-    iconAnchor: [11, 11],
+    iconSize: [22, 22], iconAnchor: [11, 11],
   });
 
-  // Inject pulse keyframes once
+  // Pulse keyframes
   (function injectPulseCSS() {
     const style = document.createElement("style");
     style.textContent = `
-      @keyframes pulse { 0%{transform:translate(-50%,-50%) scale(1);opacity:.85}
-        70%{transform:translate(-50%,-50%) scale(2.3);opacity:0} 100%{transform:translate(-50%,-50%) scale(2.3);opacity:0} }
-    `;
+      @keyframes pulse {
+        0% { transform:translate(-50%,-50%) scale(1); opacity:.85; }
+        70%{ transform:translate(-50%,-50%) scale(2.3); opacity:0; }
+        100%{ transform:translate(-50%,-50%) scale(2.3); opacity:0; }
+      }`;
     document.head.appendChild(style);
   })();
 
-  // -------------- State --------------
-  let home = null;     // { lat, lon, display }
-  let origin = null;   // { lat, lon, label }
+  // -------------- State --------------------
+  let home = null;            // { lat, lon, display }
+  let origin = null;          // { lat, lon, label }
   let originMarker = null;
   let homeMarker = null;
 
-  let stopMarkers = new Map(); // id -> marker
+  const stopMarkers = new Map(); // id -> marker
   let bestStopId = null;
-  let bestStopMarker = null;   // marker instance for best suggestion (for icon swap)
-  let selectedStopMarker = null; // extra selected marker for non-best picks
+  let bestStopMarker = null;
+  let selectedStopMarker = null;
 
-  // -------------- UI els --------------
+  let routeLayer = null;
+  const routeColor = "#0ea5e9";
+
+  // -------------- UI elements --------------
   const elSearch = $("#search");
   const elResults = $("#results");
   const elHomeInput = $("#home-input");
@@ -83,8 +78,9 @@
   const elBestLabel = $("#best-label");
   const elErrors = $("#errors");
 
-  // -------------- Helpers --------------
+  // -------------- Helpers ------------------
   function showError(msg) {
+    if (!elErrors) return;
     elErrors.textContent = msg || "";
     elErrors.style.display = msg ? "block" : "none";
   }
@@ -116,13 +112,14 @@
   }
   function attachDropdown(inputEl, resultsEl, onPick) {
     let aborter = null;
-    inputEl.addEventListener("input", async () => {
+    inputEl?.addEventListener("input", async () => {
       const q = inputEl.value.trim();
-      if (!q) { resultsEl.style.display = "none"; resultsEl.innerHTML = ""; return; }
+      if (!q) { if(resultsEl){resultsEl.style.display="none"; resultsEl.innerHTML="";} return; }
       try {
         if (aborter) aborter.abort();
         aborter = new AbortController();
         const items = await geocode(q);
+        if (!resultsEl) return;
         resultsEl.innerHTML = items.map(it => {
           const name = it.display_name.replace(/,? United Kingdom$/, "");
           return `<button data-lat="${it.lat}" data-lon="${it.lon}" title="${name}">${name}</button>`;
@@ -130,7 +127,7 @@
         resultsEl.style.display = "block";
       } catch { /* ignore */ }
     });
-    resultsEl.addEventListener("click", (e) => {
+    resultsEl?.addEventListener("click", (e) => {
       if (e.target.tagName !== "BUTTON") return;
       const lat = parseFloat(e.target.getAttribute("data-lat"));
       const lon = parseFloat(e.target.getAttribute("data-lon"));
@@ -146,17 +143,20 @@
   function setOrigin(o) {
     origin = o;
     if (originMarker) map.removeLayer(originMarker);
-    originMarker = L.marker([o.lat, o.lon]).addTo(map).bindPopup(`<b>Origin</b><br>${o.label}`).openPopup();
+    originMarker = L.marker([o.lat, o.lon]).addTo(map)
+      .bindPopup(`<b>Origin</b><br>${o.label}`).openPopup();
     map.setView([o.lat, o.lon], 15);
-    elSelection.style.display = "block";
-    elSelection.innerHTML = `
-      <div style="display:flex;justify-content:space-between;align-items:center;">
-        <div>
-          <div style="font-weight:700;">Selected origin</div>
-          <div class="muted">${o.label}</div>
+    if (elSelection) {
+      elSelection.style.display = "block";
+      elSelection.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <div>
+            <div style="font-weight:700;">Selected origin</div>
+            <div class="muted">${o.label}</div>
+          </div>
         </div>
-      </div>
-    `;
+      `;
+    }
   }
 
   // Home handling
@@ -164,39 +164,47 @@
     const rev = await reverseGeocode(lat, lon);
     const display = formatTownPostcode(rev) || title || "Home";
     home = { lat, lon, display };
-    // pill text + click to edit
-    elHomePill.textContent = `Home: ${display}`;
-    elHomePill.style.display = "inline-block";
-    elHomeInput.style.display = "none";
-    // marker
+    if (elHomePill) {
+      elHomePill.textContent = `Home: ${display}`;
+      elHomePill.style.display = "inline-block";
+    }
+    if (elHomeInput) elHomeInput.style.display = "none";
     if (homeMarker) map.removeLayer(homeMarker);
-    homeMarker = L.marker([lat, lon], { icon: DEST_ICON }).addTo(map).bindPopup(`<b>Home</b><br>${display}`);
+    homeMarker = L.marker([lat, lon], { icon: DEST_ICON }).addTo(map)
+      .bindPopup(`<b>Home</b><br>${display}`);
   }
-
-  // Make Home pill reopen the input
-  elHomePill.addEventListener("click", () => {
+  elHomePill?.addEventListener("click", () => {
+    if (!elHomeInput) return;
     elHomeInput.value = "";
     elHomeInput.style.display = "block";
     elHomeInput.focus();
   });
 
   // Attach search UIs
-  attachDropdown($("#search"), $("#results"), ({ lat, lon, title }) => setOrigin({ lat, lon, label: title }));
+  attachDropdown(elSearch, elResults, ({ lat, lon, title }) => setOrigin({ lat, lon, label: title }));
   attachDropdown(elHomeInput, elHomeResults, async ({ lat, lon, title }) => {
     await setHome(lat, lon, title);
-    elHomeResults.style.display = "none";
+    if (elHomeResults) elHomeResults.style.display = "none";
   });
 
-  // Use my location
-  $("#btn-my-location").addEventListener("click", () => {
-    if (!navigator.geolocation) { showError("Geolocation not supported."); return; }
-    navigator.geolocation.getCurrentPosition(async (pos) => {
-      const { latitude: lat, longitude: lon } = pos.coords;
-      setOrigin({ lat, lon, label: "My location" });
-    }, () => showError("Could not get your location."));
+  // Auto-locate
+  async function autoLocate() {
+    if (!navigator.geolocation) return false;
+    return new Promise((resolve) => {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          const lat = pos.coords.latitude, lon = pos.coords.longitude;
+          setOrigin({ lat, lon, label: "My location" });
+          resolve(true);
+        },
+        () => resolve(false),
+        { enableHighAccuracy: true, timeout: 8000, maximumAge: 30000 }
+      );
+    });
+  }
+  $("#btn-my-location")?.addEventListener("click", () => {
+    autoLocate().then(ok => { if (!ok) showError("Could not get your location."); });
   });
-
-  // Tap map to set origin
   map.on("click", async (e) => {
     const { lat, lng } = e.latlng;
     const rev = await reverseGeocode(lat, lng);
@@ -205,33 +213,70 @@
   });
 
   // ---------------- Stops + routing ----------------
-  async function fetchStops(lat, lon, radiusM) {
+
+  // Overpass stops
+  async function fetchStopsOverpass(lat, lon, radiusM) {
     const q = `
       [out:json][timeout:25];
       (
         node(around:${radiusM},${lat},${lon})["highway"="bus_stop"];
         node(around:${radiusM},${lat},${lon})["public_transport"="platform"]["bus"="yes"];
       );
-      out tags center;
-    `;
-    const r = await fetch(OVERPASS_URL, {
-      method: "POST",
-      body: "data=" + encodeURIComponent(q),
-      headers: { "Content-Type": "application/x-www-form-urlencoded" }
-    });
-    if (!r.ok) throw new Error("Stop lookup failed");
-    const j = await r.json();
-    return (j.elements || [])
-      .map(n => ({
-        id: n.id,
-        lat: n.lat || n.center?.lat,
-        lon: n.lon || n.center?.lon,
-        name: n.tags?.name || "Bus stop",
-        naptan: n.tags?.["ref:GB:Naptan"] || null
-      }))
-      .filter(s => s.lat && s.lon);
+      out tags center;`;
+    try {
+      const r = await fetch(OVERPASS_URL, {
+        method: "POST",
+        body: "data=" + encodeURIComponent(q),
+        headers: { "Content-Type": "application/x-www-form-urlencoded" }
+      });
+      if (!r.ok) return [];
+      const j = await r.json();
+      return (j.elements || [])
+        .map(n => ({
+          id: n.id,
+          lat: n.lat || n.center?.lat,
+          lon: n.lon || n.center?.lon,
+          name: n.tags?.name || "Bus stop",
+          naptan: n.tags?.["ref:GB:Naptan"] || null
+        }))
+        .filter(s => s.lat && s.lon);
+    } catch { return []; }
   }
 
+  // TfL nearby fallback (London areas)
+  function tflUnifiedParams() {
+    const id = CFG?.TFL?.APP_ID, key = CFG?.TFL?.APP_KEY;
+    if (key) {
+      const idq = id ? `&app_id=${encodeURIComponent(id)}` : "";
+      return `&app_key=${encodeURIComponent(key)}${idq}`;
+    }
+    return "";
+  }
+  async function fetchStopsTfL(lat, lon, radiusM) {
+    if (!CFG?.TFL?.ENABLED) return [];
+    try {
+      const url = `https://api.tfl.gov.uk/StopPoint?lat=${lat}&lon=${lon}&stopTypes=NaptanPublicBusCoachTram&radius=${radiusM}${tflUnifiedParams()}`;
+      const r = await fetch(url);
+      if (!r.ok) return [];
+      const j = await r.json();
+      const points = (j?.stopPoints || []).filter(sp => (sp.modes || []).includes("bus"));
+      return points.map(sp => ({
+        id: sp.id || sp.naptanId,
+        lat: sp.lat, lon: sp.lon,
+        name: sp.commonName || "Bus stop",
+        naptan: sp.naptanId || null
+      }));
+    } catch { return []; }
+  }
+
+  async function fetchStops(lat, lon, radiusM) {
+    // Prefer Overpass; if no results, try TfL (good in London)
+    let s = await fetchStopsOverpass(lat, lon, radiusM);
+    if (!s.length) s = await fetchStopsTfL(lat, lon, radiusM);
+    return s;
+  }
+
+  // Routing helpers
   async function routeDurationSec(a, b) {
     try {
       const url = `${OSRM_BASE}/${a.lon},${a.lat};${b.lon},${b.lat}?overview=false&steps=false`;
@@ -243,35 +288,34 @@
   }
 
   function clearStopsUI() {
-    // remove markers
     stopMarkers.forEach((m) => map.removeLayer(m));
     stopMarkers.clear();
     if (bestStopMarker) { map.removeLayer(bestStopMarker); bestStopMarker = null; }
     if (selectedStopMarker) { map.removeLayer(selectedStopMarker); selectedStopMarker = null; }
     bestStopId = null;
-    // sidebar
-    elStops.style.display = "none";
-    elStopsList.innerHTML = "";
-    elBestLabel.style.display = "none";
+    if (elStops) { elStops.style.display = "none"; elStopsList.innerHTML = ""; }
+    if (elBestLabel) elBestLabel.style.display = "none";
   }
 
   function clearRoute() {
     if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
-    $("#directions").style.display = "none";
-    $("#directions-steps").innerHTML = "";
+    $("#directions")?.style && ($("#directions").style.display = "none");
+    const ds = $("#directions-steps"); if (ds) ds.innerHTML = "";
   }
-  $("#btn-clear-route").addEventListener("click", clearRoute);
+  $("#btn-clear-route")?.addEventListener("click", clearRoute);
 
+  // TfL arrivals
   function isTfLStop(naptanId) { return !!naptanId && /^4900/i.test(naptanId); }
-  function tflAuthParams() {
-    const id = CFG?.TFL?.APP_ID, key = CFG?.TFL?.APP_KEY;
-    if (id && key) return `?app_id=${encodeURIComponent(id)}&app_key=${encodeURIComponent(key)}`;
-    return "";
+  function tflApimHeaders() {
+    const k = CFG?.TFL?.SUBSCRIPTION_KEY;
+    return k ? { "Ocp-Apim-Subscription-Key": k } : {};
   }
   async function tflArrivals(naptanId) {
     try {
-      const url = `https://api.tfl.gov.uk/StopPoint/${encodeURIComponent(naptanId)}/arrivals${tflAuthParams()}`;
-      const r = await fetch(url);
+      const sep = tflUnifiedParams() ? "?" : "";
+      const qp  = tflUnifiedParams().replace(/^&/, "");
+      const url = `https://api.tfl.gov.uk/StopPoint/${encodeURIComponent(naptanId)}/arrivals${sep}${qp}`;
+      const r = await fetch(url, { headers: tflApimHeaders() });
       if (!r.ok) return [];
       const j = await r.json();
       j.sort((a,b)=>a.timeToStation-b.timeToStation);
@@ -283,23 +327,103 @@
     } catch { return []; }
   }
 
+  // --- Weather (inline): Met Office → Open-Meteo fallback ---
+  async function metOfficeSpot(lat, lon) {
+    const MO = CFG.METOFFICE || {};
+    if (!(MO.ENABLED && MO.API_KEY && MO.BASE)) return null;
+    try {
+      const headers = { 'accept': 'application/json', 'apikey': MO.API_KEY };
+      const url = `${MO.BASE}/point/hourly?excludeParameterMetadata=true&latitude=${lat}&longitude=${lon}`;
+      const r = await fetch(url, { headers });
+      if (!r.ok) return null;
+      const j = await r.json();
+      const props = j?.features?.[0]?.properties || {};
+      const t = Array.isArray(props.temperature) ? props.temperature[0] : null;
+      const code = Array.isArray(props.significantWeatherCode) ? props.significantWeatherCode[0] : null;
+      if (t == null && code == null) return null;
+      return { tempC: t, code };
+    } catch { return null; }
+  }
+  function wmCodeToText(code){
+    const MAP = {
+      0:"clear", 1:"mostly clear", 2:"partly cloudy", 3:"overcast",
+      45:"fog",48:"rime fog",51:"drizzle",53:"drizzle",55:"drizzle",
+      61:"rain",63:"rain",65:"rain",66:"freezing rain",67:"freezing rain",
+      71:"snow",73:"snow",75:"snow",77:"snow grains",
+      80:"showers",81:"showers",82:"heavy showers",
+      95:"thunderstorm",96:"thunder w/ hail",99:"thunder w/ hail"
+    };
+    return MAP[code] || `code ${code}`;
+  }
+  async function openMeteoNow(lat, lon){
+    try{
+      const u = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,weather_code&timezone=auto`;
+      const r = await fetch(u);
+      if(!r.ok) return null;
+      const j = await r.json();
+      const t = j?.current?.temperature_2m;
+      const code = j?.current?.weather_code;
+      if (t==null && code==null) return null;
+      return { tempC: t, codeText: wmCodeToText(code) };
+    }catch{ return null; }
+  }
+  async function weatherLine(lat, lon){
+    const mo = await metOfficeSpot(lat, lon);
+    if (mo) return `${Math.round(mo.tempC)}°C · code ${mo.code}`;
+    const om = await openMeteoNow(lat, lon);
+    if (om) return `${Math.round(om.tempC)}°C · ${om.codeText}`;
+    return "—";
+  }
+
+  // --- Popups with unique ids & reliable load ---
   function renderStopPopup(stop, isBest=false) {
+    const sid = `s${String(stop.id).replace(/[^a-zA-Z0-9_-]/g, "")}`;
     const hdr = isBest ? `<div class="pill" style="background:#f59e0b;color:#fff;margin-bottom:6px;">Best stop</div>` : "";
     const nap = stop.naptan ? `<div class="muted">NaPTAN ${stop.naptan}</div>` : "";
-    return `${hdr}<div style="font-weight:700">${stop.name}</div>${nap}
-      <div id="arrivals" class="muted" style="margin-top:6px;">${isTfLStop(stop.naptan) ? "Loading arrivals…" : "Live arrivals not available here"}</div>`;
+    const wxRow = (CFG.METOFFICE?.SHOW_INLINE === false) ? "" :
+      `<div id="wxline-${sid}" class="muted" style="margin-top:6px;">Loading weather…</div>`;
+    const live = isTfLStop(stop.naptan)
+      ? `<div id="arrivals-${sid}" class="muted" style="margin-top:6px;">Loading arrivals…</div>`
+      : `<div class="muted" style="margin-top:6px;">Live arrivals not available here</div>`;
+    return `${hdr}<div style="font-weight:700">${stop.name}</div>${nap}${wxRow}${live}`;
   }
 
   async function enhanceStopPopup(stop) {
+    const sid = `s${String(stop.id).replace(/[^a-zA-Z0-9_-]/g, "")}`;
+
+    // inline weather
+    if (CFG.METOFFICE?.SHOW_INLINE !== false) {
+      try {
+        const line = await weatherLine(stop.lat, stop.lon);
+        const el = document.getElementById(`wxline-${sid}`);
+        if (el) el.textContent = line;
+      } catch {
+        const el = document.getElementById(`wxline-${sid}`);
+        if (el) el.textContent = "Weather unavailable";
+      }
+    }
+
+    // TfL arrivals (London)
     if (isTfLStop(stop.naptan)) {
       const arr = await tflArrivals(stop.naptan);
-      const el = document.querySelector("#arrivals");
+      const el = document.getElementById(`arrivals-${sid}`);
       if (el) {
         el.innerHTML = arr.length
           ? `<ul style="margin:4px 0 0 16px;">${arr.map(a=>`<li>${a.line} → ${a.dest} · ${a.etaMin} min</li>`).join("")}</ul>`
           : "No live arrivals";
       }
     }
+  }
+
+  function addStopMarker(stop, isBest=false) {
+    const icon = isBest ? BEST_PULSE_ICON : REGULAR_STOP_ICON;
+    const m = L.marker([stop.lat, stop.lon], { icon, zIndexOffset: isBest ? 400 : 0 })
+      .addTo(map)
+      .bindPopup(renderStopPopup(stop, isBest));
+    m.on("popupopen", () => enhanceStopPopup(stop));
+    m.on("click", () => chooseStopAndRoute(stop)); // selecting also routes
+    stopMarkers.set(stop.id, m);
+    if (isBest) bestStopMarker = m;
   }
 
   async function drawRouteVia(stop) {
@@ -314,68 +438,68 @@
       const j1 = await r1.json(); const j2 = await r2.json();
       const coords = [
         ...(j1.routes?.[0]?.geometry?.coordinates || []),
-        ...(j2.routes?.[0]?.geometry?.coordinates || []),
+        ...(j2.routes?.[0]?.geometry?.coordinates || [])
       ].map(([x,y])=>[y,x]);
       if (coords.length) {
         if (routeLayer) map.removeLayer(routeLayer);
         routeLayer = L.polyline(coords, { color: routeColor, weight: 5, opacity: 0.85 }).addTo(map);
-        $("#directions").style.display = "block";
-        $("#directions-steps").innerHTML = `
-          <div class="dir-step">Walk to <b>${stop.name}</b>${stop.id===bestStopId ? " (best stop)" : ""}</div>
-          <div class="dir-step">Then continue on to <b>Home</b></div>
-        `;
+        const dEl = $("#directions"); const sEl = $("#directions-steps");
+        if (dEl && sEl) {
+          dEl.style.display = "block";
+          sEl.innerHTML = `
+            <div class="dir-step">Walk to <b>${stop.name}</b>${stop.id===bestStopId ? " (best stop)" : ""}</div>
+            <div class="dir-step">Then continue on to <b>Home</b></div>
+          `;
+        }
       }
-      await enhanceStopPopup(stop);
-    } catch {/* ignore */}
+    } catch { /* ignore */ }
   }
 
   async function chooseStopAndRoute(stop) {
-    // Update selection card
-    elSelection.style.display = "block";
-    elSelection.innerHTML = `
-      <div class="kv">
-        <div><strong>${stop.name}</strong> ${stop.id===bestStopId ? `<span class="pill" style="background:#f59e0b;color:#fff;margin-left:6px;">Best stop</span>` : ""}</div>
-        <div class="muted">${toFixed(stop.lat)}, ${toFixed(stop.lon)}</div>
-      </div>
-    `;
+    // Selection card
+    if (elSelection) {
+      elSelection.style.display = "block";
+      elSelection.innerHTML = `
+        <div class="kv">
+          <div><strong>${stop.name}</strong> ${stop.id===bestStopId ? `<span class="pill" style="background:#f59e0b;color:#fff;margin-left:6px;">Best stop</span>` : ""}</div>
+          <div class="muted">${toFixed(stop.lat)}, ${toFixed(stop.lon)}</div>
+        </div>
+      `;
+    }
 
-    // Switch icons:
-    //  - If this is the BEST stop: change its pulsing icon -> golden selected icon
-    //  - If another stop is selected: show a temporary selected marker (so we don't disturb the best marker)
+    // Ensure popup is open *before* we load dynamic weather/arrivals
     if (stop.id === bestStopId && bestStopMarker) {
       bestStopMarker.setIcon(BEST_SELECTED_ICON);
+      bestStopMarker.setPopupContent(renderStopPopup(stop, true));
+      bestStopMarker.openPopup();
     } else {
       if (selectedStopMarker) { map.removeLayer(selectedStopMarker); selectedStopMarker = null; }
-      selectedStopMarker = L.marker([stop.lat, stop.lon], { icon: REGULAR_STOP_ICON }).addTo(map);
+      selectedStopMarker = L.marker([stop.lat, stop.lon], { icon: REGULAR_STOP_ICON })
+        .addTo(map)
+        .bindPopup(renderStopPopup(stop, false));
+      selectedStopMarker.on("popupopen", () => enhanceStopPopup(stop));
+      selectedStopMarker.openPopup();
     }
 
     await drawRouteVia(stop);
   }
 
-  function addStopMarker(stop, isBest=false) {
-    const icon = isBest ? BEST_PULSE_ICON : REGULAR_STOP_ICON;
-    const m = L.marker([stop.lat, stop.lon], { icon, zIndexOffset: isBest ? 400 : 0 })
-      .addTo(map)
-      .bindPopup(renderStopPopup(stop, isBest));
-    m.on("popupopen", () => enhanceStopPopup(stop));
-    m.on("click", () => chooseStopAndRoute(stop));
-    stopMarkers.set(stop.id, m);
-    if (isBest) { bestStopMarker = m; }
-  }
-
   async function findBestStop() {
     showError("");
-    if (!origin) { showError("Pick an origin first."); return; }
+    // Ensure we have origin; try to auto-locate if not
+    if (!origin) {
+      const ok = await autoLocate();
+      if (!ok) { showError("Pick an origin (tap the map) or allow location."); return; }
+    }
     if (!home) { showError("Set your Home first."); return; }
 
     // reset UI
     clearStopsUI();
     clearRoute();
+    $("#stops-radius") && ($("#stops-radius").textContent = String(SEARCH_RADIUS_METERS));
 
     // Load nearby stops
-    let stops = [];
-    try { stops = await fetchStops(origin.lat, origin.lon, SEARCH_RADIUS_METERS); }
-    catch { showError("Could not load nearby stops."); return; }
+    let stops = await fetchStops(origin.lat, origin.lon, SEARCH_RADIUS_METERS);
     if (!stops.length) { showError("No stops found nearby."); return; }
 
     // Pre-pick closest N to limit routing calls
@@ -390,9 +514,7 @@
     for (const s of subset) {
       const d1 = await routeDurationSec({lat:origin.lat,lon:origin.lon},{lat:s.lat,lon:s.lon});
       const d2 = await routeDurationSec({lat:s.lat,lon:s.lon},{lat:home.lat,lon:home.lon});
-      s.walkToStopSec = d1;
-      s.walkToHomeSec = d2;
-      s.totalSec = d1 + d2;
+      s.walkToStopSec = d1; s.walkToHomeSec = d2; s.totalSec = d1 + d2;
       if (!best || s.totalSec < best.totalSec) best = s;
     }
     bestStopId = best?.id || null;
@@ -400,56 +522,45 @@
     // Plot all stops (best pulses)
     stops.forEach(s => addStopMarker(s, s.id === bestStopId));
     if (best) {
-      elBestLabel.style.display = "inline-block";
+      elBestLabel && (elBestLabel.style.display = "inline-block");
       map.panTo([best.lat, best.lon], { animate: true });
-      // Open popup of best
-      if (bestStopMarker) bestStopMarker.openPopup();
+      if (bestStopMarker) bestStopMarker.openPopup(); // will trigger weather/arrivals
     }
 
     // Sidebar list
-    elStops.style.display = "block";
-    elStopsList.innerHTML = subset
-      .sort((a,b)=>a.totalSec - b.totalSec)
-      .map(s => `
-        <div class="stop-item" data-stop-id="${s.id}">
-          <div class="stop-left">
-            <div class="stop-name">${s.name}</div>
-            ${s.naptan ? `<span class="pill">NaPTAN ${s.naptan}</span>` : ""}
-            ${s.id===bestStopId ? `<span class="pill" style="background:#f59e0b;color:#fff;">Best</span>` : ""}
+    if (elStops && elStopsList) {
+      elStops.style.display = "block";
+      elStopsList.innerHTML = subset
+        .sort((a,b)=>a.totalSec - b.totalSec)
+        .map(s => `
+          <div class="stop-item" data-stop-id="${s.id}">
+            <div class="stop-left">
+              <div class="stop-name">${s.name}</div>
+              ${s.naptan ? `<span class="pill">NaPTAN ${s.naptan}</span>` : ""}
+              ${s.id===bestStopId ? `<span class="pill" style="background:#f59e0b;color:#fff;">Best</span>` : ""}
+            </div>
+            <div class="muted">Walk: ${fmtMin(s.walkToStopSec)} + ${fmtMin(s.walkToHomeSec)} = <b>${fmtMin(s.totalSec)}</b></div>
           </div>
-          <div class="muted">Walk: ${fmtMin(s.walkToStopSec)} + ${fmtMin(s.walkToHomeSec)} = <b>${fmtMin(s.totalSec)}</b></div>
-        </div>
-      `).join("");
+        `).join("");
 
-    // Click in list selects & routes
-    elStopsList.querySelectorAll(".stop-item").forEach(row => {
-      row.addEventListener("click", () => {
-        const id = row.getAttribute("data-stop-id");
-        const s = subset.find(x => String(x.id) === String(id)) || stops.find(x => String(x.id) === String(id));
-        if (s) chooseStopAndRoute(s);
+      // Click to select & route
+      elStopsList.querySelectorAll(".stop-item").forEach(row => {
+        row.addEventListener("click", () => {
+          const id = row.getAttribute("data-stop-id");
+          const s = subset.find(x => String(x.id) === String(id)) || stops.find(x => String(x.id) === String(id));
+          if (s) chooseStopAndRoute(s);
+        });
       });
-    });
+    }
 
     // Auto-route to best
     if (best) await chooseStopAndRoute(best);
   }
 
   // Button
-  $("#btn-best-stop").addEventListener("click", findBestStop);
+  $("#btn-best-stop")?.addEventListener("click", findBestStop);
 
-  // Restore saved Home if present (optional)
-  // (If you’d like persistence, uncomment the lines below and pair with localStorage set.)
-  /*
-  try {
-    const saved = JSON.parse(localStorage.getItem("freshstop.home") || "null");
-    if (saved && saved.lat && saved.lon && saved.display) {
-      home = saved;
-      elHomePill.textContent = `Home: ${home.display}`;
-      elHomePill.style.display = "inline-block";
-      homeMarker = L.marker([home.lat, home.lon], { icon: DEST_ICON }).addTo(map).bindPopup(`<b>Home</b><br>${home.display}`);
-      elHomeInput.style.display = "none";
-    }
-  } catch {}
-  */
+  // Try to auto-locate on boot (so the button "just works")
+  (async () => { await autoLocate(); })();
 
 })();
