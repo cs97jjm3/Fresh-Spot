@@ -1,8 +1,4 @@
-/* global L */
 
-(() => {
-
-// ---- Non-secret defaults (override in config.js) ----
 window.CONFIG = Object.assign({
   HOME: { name: "Home", lat: 52.6755, lon: 0.1361 },
   OVERPASS_URL: "https://overpass-api.de/api/interpreter",
