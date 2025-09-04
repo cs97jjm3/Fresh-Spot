@@ -75,7 +75,7 @@ function renderHomeUI() {
     elHomeInput.style.display = "none";
     elHomePill.style.display = "";
     elHomeEdit.style.display = "";
-    elHomePill.textContent = `Home: ${home.label || home.postcode || `${home.lat.toFixed(3)}, ${home.lon.toFixed(3)}`}`;
+elHomePill.textContent = "Home";
     if (elHomeResults) { elHomeResults.style.display = "none"; elHomeResults.innerHTML = ""; }
   } else {
     elHomeInput.style.display = "";
