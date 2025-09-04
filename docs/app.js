@@ -1,56 +1,57 @@
 /* global L */
 
-// -----------------------------
+// =============================
 // Config / Globals
-// -----------------------------
-const OWM_KEY = window.OWM_KEY;          // from config.js
-const ORS_KEY = window.ORS_KEY || null;  // optional fallback
+// =============================
+const OWM_KEY = window.OWM_KEY;          // from config.js (required for weather/air)
+const ORS_KEY = window.ORS_KEY || null;  // optional (fallback router if OSRM is down)
+
 const STATE = {
   map: null,
   layerStops: null,
   layerRoute: null,
   meMarker: null,
   homeMarker: null,
-  selectedStopMarker: null,
-  me: null,        // {lat, lon}
-  home: null,      // {lat, lon, label}
+  selectedStopMarker: null, // current chosen stop marker
+  me: null,                  // {lat, lon}
+  home: null,                // {lat, lon, label}
   lastSearchResults: [],
   lastHomeResults: [],
 };
 
 // Tunables
-const STOPS_RADIUS_M = 800;           // default search radius
+const STOPS_RADIUS_M = 800;
 const OVERPASS_ENDPOINT = "https://overpass-api.de/api/interpreter";
 const NOMINATIM = "https://nominatim.openstreetmap.org/search";
 const OSRM = "https://router.project-osrm.org";
 const ORS = "https://api.openrouteservice.org/v2/directions/foot-walking";
 
-// UI
-const $ = (sel) => document.querySelector(sel);
-const $$ = (sel) => [...document.querySelectorAll(sel)];
-
-const elSearch = $("#search");
-const elResults = $("#results");
-const elHomeInput = $("#home-input");
+// =============================
+// DOM shortcuts
+// =============================
+const $  = (sel) => document.querySelector(sel);
+const elSearch      = $("#search");
+const elResults     = $("#results");
+const elHomeInput   = $("#home-input");
 const elHomeResults = $("#home-results");
-const elHomePill = $("#home-pill");
-const elHomeEdit = $("#home-edit");
-const elStops = $("#stops");
-const elStopsList = $("#stops-list");
+const elHomePill    = $("#home-pill");
+const elHomeEdit    = $("#home-edit");
+const elStops       = $("#stops");
+const elStopsList   = $("#stops-list");
 const elStopsRadius = $("#stops-radius");
-const elBtnMyLoc = $("#btn-my-location");
+const elBtnMyLoc    = $("#btn-my-location");
 const elBtnBestHome = $("#btn-best-home");
-const elSelection = $("#selection");
-const elWeather = $("#weather");
-const elAir = $("#air");
-const elDirections = $("#directions");
-const elDirSteps = $("#directions-steps");
-const elErrors = $("#errors");
+const elSelection   = $("#selection");
+const elWeather     = $("#weather");
+const elAir         = $("#air");
+const elDirections  = $("#directions");
+const elDirSteps    = $("#directions-steps");
+const elErrors      = $("#errors");
 
-// -----------------------------
-// Helpers
-// -----------------------------
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+// =============================
+// Utilities
+// =============================
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function toFixed(n, d = 5) { return Number.parseFloat(n).toFixed(d); }
 
 function haversine(a, b) {
@@ -78,26 +79,101 @@ function bearing(from, to) {
   let θ = toDeg(Math.atan2(y, x));
   return (θ + 360) % 360;
 }
-
 function angleDiff(a, b) {
   let d = Math.abs(a - b) % 360;
   return d > 180 ? 360 - d : d;
 }
-
-function fmtDist(m) {
-  if (m < 1000) return `${Math.round(m)} m`;
-  return `${(m / 1000).toFixed(1)} km`;
-}
+function fmtDist(m) { return m < 1000 ? `${Math.round(m)} m` : `${(m / 1000).toFixed(1)} km`; }
 
 function setError(msg) {
   elErrors.style.display = msg ? "block" : "none";
   elErrors.textContent = msg || "";
 }
 
-// -----------------------------
+// =============================
+// Inject minimal CSS for pulse
+// =============================
+function injectPulseCSS() {
+  const css = `
+  @keyframes pulse-wave {
+    0%   { transform: scale(0.6); opacity: 0.8; }
+    70%  { transform: scale(1.6); opacity: 0; }
+    100% { transform: scale(1.6); opacity: 0; }
+  }
+  .pulse-pin {
+    position: relative;
+    width: 46px; height: 46px;
+    transform: translate(-50%, -100%); /* anchor bottom-center */
+  }
+  .pulse-dot {
+    position: absolute; left: 50%; top: 50%;
+    width: 16px; height: 16px; margin-left: -8px; margin-top: -24px;
+    background: #f43f5e; border-radius: 50%; box-shadow: 0 0 0 3px #fff, 0 4px 14px rgba(0,0,0,.35);
+  }
+  .pulse-wave {
+    position: absolute; left: 50%; top: 50%;
+    width: 18px; height: 18px; margin-left: -9px; margin-top: -25px;
+    border: 2px solid #fda4af; border-radius: 50%;
+    animation: pulse-wave 1.8s ease-out infinite;
+  }
+  .pulse-star {
+    position: absolute; left: 50%; top: 50%;
+    width: 22px; height: 22px; margin-left: -11px; margin-top: -38px;
+    background: #f43f5e; color: #fff; font-weight: 900; line-height: 22px; text-align: center;
+    border-radius: 6px; transform: rotate(-8deg);
+    box-shadow: 0 2px 8px rgba(0,0,0,.35);
+  }`;
+  const style = document.createElement("style");
+  style.setAttribute("data-freshstop", "pulse-css");
+  style.textContent = css;
+  document.head.appendChild(style);
+}
+
+// =============================
+// Icons
+// =============================
+const NORMAL_STOP_ICON = L.icon({
+  iconUrl:
+    "data:image/svg+xml;utf8," +
+    encodeURIComponent(`
+      <svg xmlns="http://www.w3.org/2000/svg" width="28" height="40" viewBox="0 0 28 40">
+        <defs>
+          <filter id="s" x="-50%" y="-50%" width="200%" height="200%">
+            <feDropShadow dx="0" dy="1.5" stdDeviation="1.5" flood-color="rgba(0,0,0,.35)"/>
+          </filter>
+        </defs>
+        <g filter="url(#s)">
+          <path d="M14 39c6-9 12-14 12-23A12 12 0 1 0 2 16c0 9 6 14 12 23z" fill="#0ea5e9"/>
+          <circle cx="14" cy="16" r="5.5" fill="#fff"/>
+        </g>
+      </svg>`),
+  iconSize: [28, 40],
+  iconAnchor: [14, 36],
+  popupAnchor: [0, -30],
+});
+
+// Best stop pulsing DivIcon
+function createBestPulseIcon(label = "Best") {
+  return L.divIcon({
+    className: "", // we use inline HTML
+    iconSize: [46, 46],
+    iconAnchor: [23, 38],
+    html: `
+      <div class="pulse-pin">
+        <div class="pulse-wave"></div>
+        <div class="pulse-dot"></div>
+        <div class="pulse-star">★</div>
+      </div>
+    `,
+  });
+}
+
+// =============================
 // Map init
-// -----------------------------
+// =============================
 function initMap() {
+  injectPulseCSS();
+
   STATE.map = L.map("map", { zoomControl: true }).setView([52.5, -1.9], 6);
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
     maxZoom: 19,
@@ -107,17 +183,19 @@ function initMap() {
   STATE.layerStops = L.layerGroup().addTo(STATE.map);
   STATE.layerRoute = L.layerGroup().addTo(STATE.map);
 
-  // Restore Home if set
+  // Restore Home
   const savedHome = localStorage.getItem("freshstop.home");
   if (savedHome) {
     try {
       STATE.home = JSON.parse(savedHome);
       showHomePill(STATE.home.label);
       placeHomeMarker(STATE.home);
-    } catch { /* ignore */ }
+    } catch {
+      // ignore
+    }
   }
 
-  // Wire map click for “selection” card (optional UX nicety)
+  // Optional: click map shows selection
   STATE.map.on("click", (e) => {
     const { lat, lng } = e.latlng;
     showSelection({ lat, lon: lng }, "Selected point");
@@ -128,8 +206,7 @@ function placeHomeMarker(home) {
   if (STATE.homeMarker) STATE.map.removeLayer(STATE.homeMarker);
   STATE.homeMarker = L.marker([home.lat, home.lon], { title: "Home" })
     .addTo(STATE.map)
-    .bindPopup("Home")
-    .openPopup();
+    .bindPopup("Home");
 }
 
 function placeMeMarker(me) {
@@ -139,9 +216,9 @@ function placeMeMarker(me) {
   }).addTo(STATE.map).bindPopup("You are here");
 }
 
-// -----------------------------
-// Geocoding (Nominatim) with debounce
-// -----------------------------
+// =============================
+// Geocoding (Nominatim) + debounce
+// =============================
 function debounce(fn, ms = 250) {
   let t;
   return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
@@ -208,9 +285,9 @@ function showHomePill(label) {
   elHomeEdit.style.display = "inline-block";
 }
 
-// -----------------------------
-// Weather & Air (OpenWeatherMap)
-// -----------------------------
+// =============================
+// Weather & Air (OWM)
+// =============================
 async function getWeather(lat, lon) {
   if (!OWM_KEY) return null;
   const u = `https://api.openweathermap.org/data/2.5/onecall?lat=${lat}&lon=${lon}&units=metric&appid=${OWM_KEY}&exclude=minutely,daily,alerts`;
@@ -227,36 +304,28 @@ async function getAir(lat, lon) {
   return res.json();
 }
 
-function aqiLabel(aqi) {
-  // OWM AQI: 1 Good, 2 Fair, 3 Moderate, 4 Poor, 5 Very Poor
-  return ["", "Good", "Fair", "Moderate", "Poor", "Very Poor"][aqi] || "n/a";
-}
+function aqiLabel(aqi) { return ["", "Good", "Fair", "Moderate", "Poor", "Very Poor"][aqi] || "n/a"; }
 
 function renderWeatherCard(whereLabel, wx, coords) {
   if (!wx) return "";
-  const iconNow = wx.current.weather?.[0]?.icon;
+  const iconNow = wx.current.weather?.[0]?.icon || "01d";
   const descNow = wx.current.weather?.[0]?.description || "—";
   const tNow = Math.round(wx.current.temp);
-
-  // Next 3 hours (from hourly)
   const hours = (wx.hourly || []).slice(1, 4).map(h => ({
     t: new Date(h.dt * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
     temp: Math.round(h.temp),
-    icon: h.weather?.[0]?.icon,
+    icon: h.weather?.[0]?.icon || "01d",
   }));
-
   const hourHtml = hours.map(h => `
     <div class="wx-hour">
       <div class="t">${h.t}</div>
-      <img alt="" src="https://openweathermap.org/img/wn/${h.icon || "01d"}@2x.png">
+      <img alt="" src="https://openweathermap.org/img/wn/${h.icon}@2x.png">
       <div>${h.temp}°</div>
-    </div>
-  `).join("");
-
+    </div>`).join("");
   return `
     <div class="wx-card">
       <div class="wx-main">
-        <img alt="" src="https://openweathermap.org/img/wn/${iconNow || "01d"}@2x.png" width="64" height="64">
+        <img alt="" src="https://openweathermap.org/img/wn/${iconNow}@2x.png" width="64" height="64">
         <div>
           <div class="pill">${whereLabel}</div>
           <div class="wx-temp">${tNow}°C</div>
@@ -265,8 +334,7 @@ function renderWeatherCard(whereLabel, wx, coords) {
         </div>
       </div>
       <div class="wx-hours">${hourHtml}</div>
-    </div>
-  `;
+    </div>`;
 }
 
 function renderAirCard(whereLabel, air) {
@@ -300,7 +368,6 @@ async function showWeatherAndAir(me, stop) {
       <div style="height:10px"></div>
       ${renderWeatherCard("Chosen stop", wxStop, stop)}
     `;
-
     elAir.innerHTML = `
       <div class="card" style="border:none;padding:0">
         ${renderAirCard("You", airMe)}
@@ -313,11 +380,10 @@ async function showWeatherAndAir(me, stop) {
   }
 }
 
-// -----------------------------
+// =============================
 // Stops (Overpass)
-// -----------------------------
+// =============================
 async function fetchNearbyStops(center, radiusM = STOPS_RADIUS_M) {
-  // highway=bus_stop and public_transport=platform (bus) + railway=station (optional)
   const around = `${radiusM},${center.lat},${center.lon}`;
   const query = `
     [out:json][timeout:25];
@@ -344,24 +410,62 @@ async function fetchNearbyStops(center, radiusM = STOPS_RADIUS_M) {
   })).sort((a,b)=>a.dist-b.dist);
 }
 
-// Heuristic: prefer stops that are "on the way" to Home.
-// If angle between (me -> stop) and (me -> home) is <= 75°, it’s roughly aligned towards home.
-// Otherwise we still consider the nearest as fallback.
+// Prefer stops roughly along the direction home
 function pickBestStop(me, home, stops) {
   if (!stops.length) return null;
   const bh = bearing(me, home);
   const scored = stops.map(s => {
     const bs = bearing(me, { lat: s.lat, lon: s.lon });
     const ang = angleDiff(bh, bs);
-    const alignScore = Math.max(0, 1 - (ang / 90)); // 0..1 (good if <=90°)
-    // Composite: closeness + alignment (weight alignment a bit higher)
+    const alignScore = Math.max(0, 1 - (ang / 90)); // 0..1 good if <=90°
     const score = (0.4 * (1 / (1 + s.dist))) + (0.6 * alignScore);
     return { ...s, ang, score };
   }).sort((a,b)=>b.score - a.score);
-
-  // Prefer strongly aligned within 75°; else first in list (best by score anyway)
   const bestAligned = scored.find(s => s.ang <= 75);
   return bestAligned || scored[0];
+}
+
+// =============================
+// Map rendering for stops
+// =============================
+function drawStopsOnMap(me, stops, best) {
+  STATE.layerStops.clearLayers();
+
+  stops.forEach((s) => {
+    const isBest = !!(best && s.id === best.id);
+
+    // Use pulse icon for the best stop
+    const icon = isBest ? createBestPulseIcon() : NORMAL_STOP_ICON;
+
+    const marker = L.marker([s.lat, s.lon], {
+      title: s.name,
+      icon,
+    }).addTo(STATE.layerStops);
+
+    const popupHtml = `
+      <div style="min-width:180px">
+        <div style="font-weight:700; margin-bottom:4px;">
+          ${isBest ? "⭐ Best stop to get home<br/>" : ""}${s.name}
+        </div>
+        <div class="muted" style="font-size:12px; margin-bottom:6px;">
+          ${fmtDist(s.dist)} away${typeof s.ang === "number" ? ` • ${Math.round(s.ang)}°` : ""}
+        </div>
+        <button data-stop-id="${s.id}" class="btn" style="padding:6px 8px;">Route here</button>
+      </div>
+    `;
+
+    marker.bindPopup(popupHtml);
+
+    marker.on("popupopen", (e) => {
+      const btn = e.popup.getElement().querySelector(`button[data-stop-id="${s.id}"]`);
+      if (btn) btn.addEventListener("click", () => chooseStopAndRoute(me, s));
+    });
+
+    marker.on("click", () => {
+      marker.openPopup();
+      chooseStopAndRoute(me, s);
+    });
+  });
 }
 
 function renderStopsList(me, home, stops, best) {
@@ -376,7 +480,7 @@ function renderStopsList(me, home, stops, best) {
         <div class="stop-kind kind-bus">BUS</div>
         <div>
           <div class="stop-name">${s.name}</div>
-          <div class="muted">${fmtDist(s.dist)} • bearing to stop ${Math.round(s.ang)}°</div>
+          <div class="muted">${fmtDist(s.dist)} • bearing to stop ${Math.round(s.ang ?? 0)}°</div>
         </div>
       </div>
       <div class="stop-wx">
@@ -390,11 +494,10 @@ function renderStopsList(me, home, stops, best) {
   });
 }
 
-// -----------------------------
-// Routing (OSRM with ORS fallback)
-// -----------------------------
+// =============================
+// Routing (OSRM, fallback ORS)
+// =============================
 async function routeFoot(from, to) {
-  // Try OSRM first
   try {
     const u = `${OSRM}/route/v1/foot/${from.lon},${from.lat};${to.lon},${to.lat}?overview=full&geometries=geojson&steps=true`;
     const res = await fetch(u);
@@ -410,17 +513,15 @@ async function routeFoot(from, to) {
         };
       }
     }
-  } catch { /* fall through */ }
+  } catch {
+    // fall through
+  }
 
-  // Fallback to ORS if key exists
   if (ORS_KEY) {
     const res = await fetch(ORS, {
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": ORS_KEY },
-      body: JSON.stringify({
-        coordinates: [[from.lon, from.lat], [to.lon, to.lat]],
-        instructions: true,
-      })
+      body: JSON.stringify({ coordinates: [[from.lon, from.lat], [to.lon, to.lat]], instructions: true })
     });
     if (res.ok) {
       const data = await res.json();
@@ -443,21 +544,16 @@ async function routeFoot(from, to) {
 function clearRoute() {
   elDirections.style.display = "none";
   elDirSteps.innerHTML = "";
-  if (STATE.layerRoute) {
-    STATE.layerRoute.clearLayers();
-  }
+  if (STATE.layerRoute) STATE.layerRoute.clearLayers();
 }
 
 function showRoute(route, from, to) {
   clearRoute();
-  // Draw line
   const coords = route.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
   L.polyline(coords, { color: "#0ea5e9", weight: 5, opacity: 0.9 }).addTo(STATE.layerRoute);
 
-  // Fit
-  STATE.map.fitBounds(L.latLngBounds([ [from.lat, from.lon], [to.lat, to.lon] ]));
+  STATE.map.fitBounds(L.latLngBounds([[from.lat, from.lon], [to.lat, to.lon]]));
 
-  // Steps
   elDirections.style.display = "block";
   const mins = Math.round(route.duration / 60);
   const dist = fmtDist(route.distance);
@@ -475,9 +571,9 @@ function showRoute(route, from, to) {
   });
 }
 
-// -----------------------------
+// =============================
 // Selection & flow
-// -----------------------------
+// =============================
 function showSelection(point, label) {
   elSelection.style.display = "block";
   elSelection.innerHTML = `
@@ -488,16 +584,44 @@ function showSelection(point, label) {
   `;
 }
 
-async function chooseStopAndRoute(me, stop) {
-  // Marker
-  if (STATE.selectedStopMarker) STATE.map.removeLayer(STATE.selectedStopMarker);
-  STATE.selectedStopMarker = L.marker([stop.lat, stop.lon], { title: stop.name })
-    .addTo(STATE.map)
-    .bindPopup(stop.name)
-    .openPopup();
+function transportInfoHtml(stop) {
+  const t = stop.tags || {};
+  const operator = t.operator || t.network || "—";
+  const code = t.ref || t.local_ref || t.naptan || "—";
+  const shelter = t.shelter ? "Shelter" : "No shelter";
+  const bench = t.bench ? "Bench" : "—";
+  const lit = t.lit ? "Lit" : "—";
 
-  // Weather/Air (me & stop)
-  showWeatherAndAir(me, stop).catch((e)=>setError(e.message));
+  return `
+    <div class="grid2" style="margin-top:6px;">
+      <div><span class="muted">Operator:</span> ${operator}</div>
+      <div><span class="muted">Stop code:</span> ${code}</div>
+      <div><span class="muted">Amenities:</span> ${shelter}${bench !== "—" ? " • " + bench : ""}${lit !== "—" ? " • " + lit : ""}</div>
+      <div><a class="muted" href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(stop.name)}%20@${stop.lat},${stop.lon}" target="_blank" rel="noopener">Open in Maps</a></div>
+    </div>
+  `;
+}
+
+async function chooseStopAndRoute(me, stop) {
+  // Replace any previous selected marker with a pulsing one
+  if (STATE.selectedStopMarker) STATE.map.removeLayer(STATE.selectedStopMarker);
+  STATE.selectedStopMarker = L.marker([stop.lat, stop.lon], {
+    title: stop.name,
+    icon: createBestPulseIcon(),
+  }).addTo(STATE.map).bindPopup(stop.name);
+
+  // Selection card
+  elSelection.style.display = "block";
+  elSelection.innerHTML = `
+    <div class="kv">
+      <div><strong>${stop.name}</strong></div>
+      <div class="muted">${toFixed(stop.lat, 4)}, ${toFixed(stop.lon, 4)}</div>
+    </div>
+    ${transportInfoHtml(stop)}
+  `;
+
+  // Weather & Air
+  showWeatherAndAir(me, stop).catch((e) => setError(e.message));
 
   // Route
   try {
@@ -510,17 +634,12 @@ async function chooseStopAndRoute(me, stop) {
 
 async function computeBestStopToHome() {
   setError("");
-  // Preconditions
-  if (!STATE.home) {
-    setError("Please set your Home first.");
-    return;
-  }
+  if (!STATE.home) { setError("Please set your Home first."); return; }
   if (!STATE.me) {
-    await locateMe(); // tries to fill STATE.me
+    await locateMe();
     if (!STATE.me) { setError("Couldn’t get your location."); return; }
   }
 
-  // Fetch stops around your current location
   let stops = [];
   try {
     stops = await fetchNearbyStops(STATE.me, STOPS_RADIUS_M);
@@ -528,24 +647,19 @@ async function computeBestStopToHome() {
     setError(err.message);
     return;
   }
-  if (!stops.length) {
-    setError("No stops found nearby.");
-    return;
-  }
+  if (!stops.length) { setError("No stops found nearby."); return; }
 
-  // Score & pick best
   const best = pickBestStop(STATE.me, STATE.home, stops);
 
-  // Render list (with Best badge)
+  // Draw on map, render list, auto-pick best
+  drawStopsOnMap(STATE.me, stops, best);
   renderStopsList(STATE.me, STATE.home, stops, best);
-
-  // Auto-pick best & route
   await chooseStopAndRoute(STATE.me, best);
 }
 
-// -----------------------------
+// =============================
 // Geolocation
-// -----------------------------
+// =============================
 async function locateMe() {
   return new Promise((resolve) => {
     if (!navigator.geolocation) {
@@ -558,7 +672,6 @@ async function locateMe() {
         const { latitude, longitude } = pos.coords;
         STATE.me = { lat: latitude, lon: longitude };
         placeMeMarker(STATE.me);
-        // Center map (don’t zoom too aggressively if already set)
         const z = STATE.map.getZoom();
         STATE.map.setView([latitude, longitude], Math.max(z, 15));
         resolve(STATE.me);
@@ -572,35 +685,25 @@ async function locateMe() {
   });
 }
 
-// -----------------------------
-// Wire up UI
-// -----------------------------
+// =============================
+// Wire UI
+// =============================
 function wireUI() {
   elSearch.addEventListener("input", handleSearchInput);
   elHomeInput.addEventListener("input", handleHomeInput);
-
-  elHomeEdit.addEventListener("click", () => {
-    // Reveal the home input (just focus it)
-    elHomeInput.focus();
-  });
-
+  elHomeEdit.addEventListener("click", () => elHomeInput.focus());
   elBtnMyLoc.addEventListener("click", locateMe);
-
   elBtnBestHome.addEventListener("click", computeBestStopToHome);
 
-  // Clear route button (already in DOM)
   const elClear = $("#btn-clear-route");
   if (elClear) elClear.addEventListener("click", clearRoute);
 }
 
-// -----------------------------
+// =============================
 // Boot
-// -----------------------------
+// =============================
 (async function boot() {
   initMap();
   wireUI();
-
-  // If user already allowed location before, try immediately
-  // (Some browsers will still prompt)
   try { await locateMe(); } catch { /* ignore */ }
 })();
