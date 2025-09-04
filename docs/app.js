@@ -1,10 +1,9 @@
-
 window.CONFIG = Object.assign({
   HOME: { name: "Home", lat: 52.6755, lon: 0.1361 },
   OVERPASS_URL: "https://overpass-api.de/api/interpreter",
   OSRM_URL: "https://router.project-osrm.org",
-  PROXY_BASE: null,               // e.g. "https://dry-frog-1fcd.murrell-james.workers.dev"
-  SEARCH_RADIUS_M: 800,           // UI says 800m; keep in sync with #stops-radius
+  PROXY_BASE: null,
+  SEARCH_RADIUS_M: 800,
   MAX_STOPS: 50,
   WALK_SPEED_MPS: 1.3
 }, window.CONFIG || {});
