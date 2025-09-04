@@ -514,3 +514,4 @@ async function main(){
 
 // ---- Start up ----
 document.addEventListener('DOMContentLoaded', main);
+}
