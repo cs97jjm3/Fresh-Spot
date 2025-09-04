@@ -402,8 +402,20 @@ function setHome(h){
 function loadHome(){
   const raw = localStorage.getItem('freshstop.home');
   if (!raw) return;
-  try { const h = JSON.parse(raw); if (h && h.lat && h.lon) home = h; } catch {}
+  try {
+    const h = JSON.parse(raw);
+    if (h && typeof h === 'object') {
+      home = {
+        name: (typeof h.name === 'string' && h.name.trim()) ? h.name : 'Home',
+        lat: Number(h.lat) || CONFIG.HOME.lat,
+        lon: Number(h.lon) || CONFIG.HOME.lon
+      };
+    }
+  } catch {
+    // ignore bad JSON; keep default home
+  }
 }
+
 function updateHomeUI(){
   const pill = el('#home-pill'); const input = el('#home-input');
   if (pill) {
