@@ -142,13 +142,14 @@
       </div>
 
       <!-- Home setup/display -->
-      <div class="search" style="max-width: 360px; margin-left:12px;">
-        <input id="home-input" type="text" placeholder="Set Home (address or postcode)…" />
-        <div id="home-results" class="dropdown" style="display:none;"></div>
-      </div>
-      <!-- Shows after you pick Home once -->
-      <span id="home-pill" class="pilla" style="display:none; margin-left:8px;"></span>
-      <button id="home-edit" class="btn" style="display:none;">Change</button>
+      <!-- Home (one-time) -->
+<div class="search" style="max-width: 360px; margin-left:12px;">
+  <input id="home-input" type="text" placeholder="Set Home (address or postcode)…" />
+  <div id="home-results" class="dropdown" style="display:none;"></div>
+</div>
+
+<!-- Shows after you pick Home once -->
+<span id="home-pill" class="pilla" style="display:none; margin-left:8px; cursor:pointer;" title="Click to change Home"></span>
     </header>
 
     <div class="main">
