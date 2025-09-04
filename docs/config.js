@@ -1,7 +1,6 @@
 // === FreshStop config (secrets; DO NOT COMMIT) ===
 
 // Met Office Weather DataHub (Global Spot Site-Specific)
-// Uses apikey header. Endpoint pattern confirmed in docs & examples.
 window.CONFIG = {
   METOFFICE: {
     ENABLED: true,
@@ -17,23 +16,26 @@ window.CONFIG = {
   },
 
   // TfL Unified API (optional; improves London stops + live arrivals)
-// Unified API (StopPoint/Line/Arrivals etc.)
+  TFL: {
+    ENABLED: true,
+
+    // Unified API (StopPoint/Line/Arrivals etc.)
     APP_ID: "",                                  // optional
-    APP_KEY: "015957588b78493ea496bf478049a0fb", // ← your Primary key works for many endpoints too
+    APP_KEY: "015957588b78493ea496bf478049a0fb", // your portal key
 
     // Azure APIM subscription (Trackernet / APIM products)
-    SUBSCRIPTION_KEY: "77b770920d254535ba4c50e9f1a7c2b3b8" // example: your "trackerfreshspot" primary
+    SUBSCRIPTION_KEY: "77b770920d254535ba4c50e9f1a7c2b3b8"
+  },
 
-  // BODS / SIRI-VM (optional; browser access often blocked by CORS — leave off unless you proxy)
+  // BODS / SIRI-VM (optional; usually via backend/proxy due to CORS)
   BODS: {
     ENABLED: true,
     API_KEY: "4da209fe2ceb2ffa6d73ca9a91968e27535b841c"
-    // You will typically consume SIRI-VM via a backend/proxy for CORS & XML parsing.
   },
 
   // Optional NaPTAN static JSON (preprocessed subset; e.g. /data/naptan-stops.min.json)
   NAPTAN: {
-    STATIC_JSON_URL: "" // leave blank to skip; we continue to use Overpass + TfL where available
+    STATIC_JSON_URL: "" // leave blank to skip; Overpass + TfL will be used
   },
 
   // Routing & data sources
