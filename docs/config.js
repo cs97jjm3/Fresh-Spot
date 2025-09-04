@@ -1,5 +1,7 @@
 // === FreshStop config (secrets; DO NOT COMMIT) ===
-
+window.CONFIG = Object.assign(window.CONFIG || {}, {
+  PROXY_BASE: "https://dry-frog-1fcd.murrell-james.workers.dev"
+});
 // Met Office Weather DataHub (Global Spot Site-Specific)
 window.CONFIG = {
   METOFFICE: {
