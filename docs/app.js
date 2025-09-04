@@ -241,28 +241,28 @@ async function loadWeatherAndForecast(lat, lng) {
   hourlyCache.set(roundKey(lat, lng), hours);
 
   // Render WOW weather
-  setHTML(elWeather, `
-    <div class="wx-top">
-      <div class="wx-main">
-        ${icon ? `<img src="${iconUrl(icon)}" width="64" height="64" alt="${escapeHtml(desc)}" />` : ""}
-        <div>
-          <div class="wx-temp">${t}°C</div>
-          <div class="wx-desc">${escapeHtml(desc)} ${place ? `• <span class="pill">${escapeHtml(place)}</span>` : ""}</div>
-          <div class="muted">Feels like ${feels}°C • Wind ${wind} m/s</div>
-        </div>
+ setHTML(elWeather, `
+  <div class="wx-top">
+    <div class="wx-main">
+      ${icon ? `<img src="${iconUrl(icon)}" width="64" height="64" alt="${escapeHtml(desc)}" />` : ""}
+      <div>
+        <div class="wx-temp">${t}°C</div>
+        <div class="wx-desc">${escapeHtml(desc)} ${place ? `• <span class="pill">${escapeHtml(place)}</span>` : ""}</div>
+        <div class="muted">Feels like ${feels}°C • Wind ${wind} m/s</div>
       </div>
     </div>
+  </div>
 
-    <div style="margin-top:10px; font-weight:700;">Next 2 hours</div>
-    <div class="wx-hours">
-      ${hours.map(h => `
-        <div class="wx-hour">
-          <div>${hourStr(h.ts, h.tz)}</div>
-          ${h.icon ? `<img src="${iconUrl(h.icon)}" alt="" />` : ""}
-          <div class="t">${h.t}°C</div>
-        </div>
-      ").join("")}
-    </div>
+  <div style="margin-top:10px; font-weight:700;">Next 2 hours</div>
+  <div class="wx-hours">
+    ${hours.map(h => `
+      <div class="wx-hour">
+        <div>${hourStr(h.ts, h.tz)}</div>
+        ${h.icon ? `<img src="${iconUrl(h.icon)}" alt="" />` : ""}
+        <div class="t">${h.t}°C</div>
+      </div>
+    `).join("")}
+  </div>
   `);
   show(elWeather);
 }
