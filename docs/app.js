@@ -188,22 +188,42 @@ async function loadWeatherAndForecast(lat,lng){
     icon=wx?.weather?.[0]?.icon;
     wxNowCache.set(roundKey(lat,lng),{temp:t,icon});
   } catch (e) {
-    setHTML(elWeather, `<div class="muted">Weather unavailable • ${escapeHtml(e.message||"")}</div>`);
+    setHTML(elWeather, `<div class="wx-card"><div class="muted">Weather unavailable • ${escapeHtml(e.message||"")}</div></div>`);
     show(elWeather);
     return;
   }
 
+  // Hourly: try 3.0 → fallback to 2.5 → else none
   let hours=[];
   try {
     const one=await getJSON(`https://api.openweathermap.org/data/3.0/onecall?lat=${lat}&lon=${lng}&exclude=minutely,daily,alerts&units=metric&appid=${OWM_KEY}`);
     const tz = one?.timezone_offset || 0;
     hours=(one?.hourly||[]).slice(0,3).map(h=>({ts:h.dt,t:Math.round(h.temp),icon:h.weather?.[0]?.icon,tz}));
   } catch {
-    // ok to skip hourly
+    try {
+      const old=await getJSON(`https://api.openweathermap.org/data/2.5/onecall?lat=${lat}&lon=${lng}&exclude=minutely,daily,alerts&units=metric&appid=${OWM_KEY}`);
+      const tz = old?.timezone_offset || 0;
+      hours=(old?.hourly||[]).slice(0,3).map(h=>({ts:h.dt,t:Math.round(h.temp),icon:h.weather?.[0]?.icon,tz}));
+    } catch { /* no hourly */ }
   }
 
+  const hoursBlock = (hours && hours.length)
+    ? `
+      <div style="margin-top:10px; font-weight:700;">Next 2 hours</div>
+      <div class="wx-hours">
+        ${hours.map(h=>`
+          <div class="wx-hour">
+            <div>${hourStr(h.ts,h.tz)}</div>
+            ${h.icon?`<img src="${iconUrl(h.icon)}" alt="" />`:""}
+            <div class="t">${h.t}°C</div>
+          </div>
+        `).join("")}
+      </div>
+    `
+    : ""; // hide entirely if nothing
+
   setHTML(elWeather, `
-    <div class="wx-top">
+    <div class="wx-card">
       <div class="wx-main">
         ${icon ? `<img src="${iconUrl(icon)}" width="64" height="64" alt="${escapeHtml(desc)}" />` : ""}
         <div>
@@ -212,20 +232,12 @@ async function loadWeatherAndForecast(lat,lng){
           <div class="muted">Feels like ${feels}°C • Wind ${wind} mph</div>
         </div>
       </div>
-    </div>
-    <div style="margin-top:10px; font-weight:700;">Next 2 hours</div>
-    <div class="wx-hours">
-      ${hours.map(h=>`
-        <div class="wx-hour">
-          <div>${hourStr(h.ts,h.tz)}</div>
-          ${h.icon?`<img src="${iconUrl(h.icon)}" alt="" />`:""}
-          <div class="t">${h.t}°C</div>
-        </div>
-      `).join("")}
+      ${hoursBlock}
     </div>
   `);
   show(elWeather);
 }
+
 
 // ======= Air (WOW-ish badges/bars) =======
 function aqiClass(n){switch(n){case 1:return["Good","aqi-good"];case 2:return["Fair","aqi-fair"];case 3:return["Moderate","aqi-moderate"];case 4:return["Poor","aqi-poor"];case 5:return["Very Poor","aqi-vpoor"];default:return["Unknown","aqi-moderate"];}}
