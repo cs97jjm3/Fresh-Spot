@@ -24,9 +24,13 @@ const elBtnRoute = document.getElementById("btn-route");
 const elBtnClearRoute = document.getElementById("btn-clear-route");
 const elRouteSummary = document.getElementById("route-summary");
 
-// Route-from toggle (optional, but recommended in index.html)
+// Optional "Route from" radios (myloc/selected)
 const elRFMy = document.getElementById("rf-myloc");
 const elRFSel = document.getElementById("rf-selected");
+
+// Optional Home header elements (add these in HTML if you want a visible pill in header)
+const elHomePill = document.getElementById("home-pill");       // <span id="home-pill"></span>
+const elHomeClear = document.getElementById("home-clear");     // <button id="home-clear">Clear</button>
 
 // ======= Map setup =======
 const map = L.map("map");
@@ -47,6 +51,37 @@ let stopLayers = [];         // circle markers for stops
 // Simple in-memory caches to avoid hammering OWM
 const wxNowCache = new Map();     // key: "lat,lon" rounded -> { temp, icon, desc, name, country }
 const hourlyCache = new Map();    // key: "lat,lon" rounded -> [hourly items]
+
+// ======= Home storage =======
+const HOME_KEY = "freshstop_home";
+function getHome() {
+  try { return JSON.parse(localStorage.getItem(HOME_KEY) || "null"); } catch { return null; }
+}
+function setHome(obj) {
+  localStorage.setItem(HOME_KEY, JSON.stringify(obj));
+  renderHomePill();
+}
+function clearHome() {
+  localStorage.removeItem(HOME_KEY);
+  renderHomePill();
+}
+function renderHomePill() {
+  const home = getHome();
+  if (!elHomePill) return; // header pill is optional
+  if (home) {
+    elHomePill.innerHTML = `<span class="pill">Home: ${escapeHtml(home.label || (home.postcode || `${home.lat.toFixed(3)}, ${home.lon.toFixed(3)}`))}</span>`;
+    elHomePill.style.display = "";
+    if (elHomeClear) elHomeClear.style.display = "";
+  } else {
+    elHomePill.innerHTML = "";
+    elHomePill.style.display = "none";
+    if (elHomeClear) elHomeClear.style.display = "none";
+  }
+}
+elHomeClear && (elHomeClear.onclick = () => { clearHome(); });
+
+// On load, show Home if already set
+renderHomePill();
 
 // click to select point
 map.on("click", (e) => {
@@ -130,6 +165,7 @@ async function reverseGeocode(lat, lon) {
     line: parts.join(", "),
     display: data?.display_name || "",
     postcode: a.postcode || "",
+    label: parts.filter(Boolean).join(", ") || data?.display_name || ""
   };
 }
 
@@ -153,7 +189,7 @@ async function setSelected([lat, lng], source = "") {
   clearStops();
   clearRoute();
 
-  // selection card (friendly address, keeps coords)
+  // selection card (friendly address, keeps coords, add "Set as Home")
   const latTxt = lat.toFixed(5);
   const lngTxt = lng.toFixed(5);
 
@@ -163,14 +199,18 @@ async function setSelected([lat, lng], source = "") {
         <div style="font-weight:700; margin-bottom:4px;">Selected location</div>
         <div class="muted">Looking up address…</div>
       </div>
-      <button class="btn" id="btn-copy">Copy coords</button>
+      <div style="display:flex; gap:8px; align-items:center;">
+        <button class="btn" id="btn-copy">Copy coords</button>
+        <button class="btn" id="btn-set-home">Set as Home</button>
+      </div>
     </div>
   `);
   show(elSelection);
   document.getElementById("btn-copy").onclick = () => navigator.clipboard?.writeText(`${latTxt}, ${lngTxt}`);
 
+  let rev = null;
   try {
-    const rev = await reverseGeocode(lat, lng);
+    rev = await reverseGeocode(lat, lng);
     const pretty = rev.line || rev.display || `${latTxt}, ${lngTxt}`;
     setHTML(elSelection, `
       <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
@@ -182,6 +222,7 @@ async function setSelected([lat, lng], source = "") {
         <div style="display:flex; gap:8px; align-items:center;">
           <button class="btn" id="btn-copy">Copy coords</button>
           ${rev.postcode ? `<span class="pill" title="Postcode">${escapeHtml(rev.postcode)}</span>` : ""}
+          <button class="btn" id="btn-set-home">Set as Home</button>
         </div>
       </div>
     `);
@@ -189,6 +230,13 @@ async function setSelected([lat, lng], source = "") {
   } catch {
     // keep default coords-only view if reverse fails
   }
+
+  // Set as Home handler
+  document.getElementById("btn-set-home").onclick = () => {
+    const label = rev?.label || `${latTxt}, ${lngTxt}`;
+    const home = { lat, lon: lng, label, postcode: rev?.postcode || "" };
+    setHome(home);
+  };
 
   // load weather + air + stops (in parallel)
   try {
@@ -241,28 +289,28 @@ async function loadWeatherAndForecast(lat, lng) {
   hourlyCache.set(roundKey(lat, lng), hours);
 
   // Render WOW weather
- setHTML(elWeather, `
-  <div class="wx-top">
-    <div class="wx-main">
-      ${icon ? `<img src="${iconUrl(icon)}" width="64" height="64" alt="${escapeHtml(desc)}" />` : ""}
-      <div>
-        <div class="wx-temp">${t}°C</div>
-        <div class="wx-desc">${escapeHtml(desc)} ${place ? `• <span class="pill">${escapeHtml(place)}</span>` : ""}</div>
-        <div class="muted">Feels like ${feels}°C • Wind ${wind} m/s</div>
+  setHTML(elWeather, `
+    <div class="wx-top">
+      <div class="wx-main">
+        ${icon ? `<img src="${iconUrl(icon)}" width="64" height="64" alt="${escapeHtml(desc)}" />` : ""}
+        <div>
+          <div class="wx-temp">${t}°C</div>
+          <div class="wx-desc">${escapeHtml(desc)} ${place ? `• <span class="pill">${escapeHtml(place)}</span>` : ""}</div>
+          <div class="muted">Feels like ${feels}°C • Wind ${wind} m/s</div>
+        </div>
       </div>
     </div>
-  </div>
 
-  <div style="margin-top:10px; font-weight:700;">Next 2 hours</div>
-  <div class="wx-hours">
-    ${hours.map(h => `
-      <div class="wx-hour">
-        <div>${hourStr(h.ts, h.tz)}</div>
-        ${h.icon ? `<img src="${iconUrl(h.icon)}" alt="" />` : ""}
-        <div class="t">${h.t}°C</div>
-      </div>
-    `).join("")}
-  </div>
+    <div style="margin-top:10px; font-weight:700;">Next 2 hours</div>
+    <div class="wx-hours">
+      ${hours.map(h => `
+        <div class="wx-hour">
+          <div>${hourStr(h.ts, h.tz)}</div>
+          ${h.icon ? `<img src="${iconUrl(h.icon)}" alt="" />` : ""}
+          <div class="t">${h.t}°C</div>
+        </div>
+      `).join("")}
+    </div>
   `);
   show(elWeather);
 }
@@ -317,7 +365,7 @@ async function loadAir(lat, lng) {
   show(elAir);
 }
 
-// ======= Stops (Overpass) + Weather per stop =======
+// ======= Stops (Overpass) + Weather per stop + "→ Home" hint =======
 async function loadStops(lat, lng, radiusMeters = 800) {
   elStopsRadius.textContent = radiusMeters;
   const query = `
@@ -358,13 +406,16 @@ out skel qt;
     stopLayers.push(m);
   }
 
-  // Render list (placeholders for weather)
+  // Render list (placeholders for weather + home badge area)
   setHTML(elStopsList, stops.map(s => `
     <div class="stop-item" data-stop="${s.id}">
       <div class="stop-left">
         <div class="stop-wx" id="wx-${s.id}"><span class="muted">…</span></div>
         <div>
-          <div class="stop-name">${escapeHtml(s.name)}</div>
+          <div class="stop-name">
+            ${escapeHtml(s.name)}
+            <span id="homehint-${s.id}" class="pill" style="display:none; margin-left:6px;">→ Home</span>
+          </div>
           <div class="muted" style="font-size:12px;">${s.kind === "bus" ? "Bus stop" : "Train/Tram"} • ${Math.round(s.dist)} m</div>
         </div>
       </div>
@@ -378,6 +429,12 @@ out skel qt;
 
   // Fill weather for each stop (cached + limited)
   await fillStopsWeather(stops);
+
+  // If Home set, annotate which stops likely head to Home (via route relation names)
+  const home = getHome();
+  if (home) {
+    try { await annotateStopsTowardHome(stops, home); } catch { /* ignore if Overpass busy */ }
+  }
 
   // Wire route buttons – use origin based on toggle
   [...elStopsList.querySelectorAll("button[data-route]")].forEach(btn => {
@@ -426,6 +483,69 @@ async function fillStopsWeather(stops) {
     } else {
       el.innerHTML = `<span class="pill">n/a</span>`;
     }
+  }
+}
+
+// Heuristic: for top N stops, fetch route relations serving that stop,
+// then mark a "→ Home" badge if route tags ('to','name','destination','via') mention home label/postcode.
+async function annotateStopsTowardHome(stops, home) {
+  const MAX_STOPS_CHECK = 8;
+  const targets = stops.slice(0, MAX_STOPS_CHECK);
+  const tokens = homeTokens(home);
+
+  for (const s of targets) {
+    try {
+      const rels = await fetchStopRoutes(s.id);
+      const hit = rels.some(r => {
+        const t = (r.tags || {});
+        const hay = [
+          t.to, t.name, t.destination, t.via, t["name:en"]
+        ].filter(Boolean).join(" • ").toLowerCase();
+        return tokens.some(tok => hay.includes(tok));
+      });
+      if (hit) {
+        const badge = document.getElementById(`homehint-${s.id}`);
+        if (badge) badge.style.display = "";
+      }
+    } catch {
+      // Overpass busy — skip
+    }
+  }
+
+  // Helper: build tokens from label (split by commas/spaces) and postcode
+  function homeTokens(h) {
+    const arr = [];
+    const label = (h.label || "").toLowerCase();
+    const postcode = (h.postcode || "").toLowerCase();
+    // Add full label and postcode
+    if (label) arr.push(label);
+    if (postcode) arr.push(postcode);
+    // Add last token from label (often town/city)
+    const parts = label.split(/,\s*/).map(x => x.trim()).filter(Boolean);
+    if (parts.length) {
+      const last = parts[parts.length - 1];
+      if (last && last.length > 2) arr.push(last.toLowerCase());
+    }
+    // Deduplicate short words
+    return [...new Set(arr.filter(x => x.length >= 3))];
+  }
+
+  // Overpass: relations that reference this node (bn = by node)
+  async function fetchStopRoutes(nodeId) {
+    const q = `
+[out:json][timeout:25];
+node(${nodeId});
+rel(bn)->.r;
+.r[route~"bus|tram|train|subway|light_rail"] out tags;
+`.trim();
+    const res = await fetch("https://overpass-api.de/api/interpreter", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ data: q })
+    });
+    if (!res.ok) throw new Error("Overpass error");
+    const json = await res.json();
+    return (json.elements || []).filter(e => e.type === "relation");
   }
 }
 
