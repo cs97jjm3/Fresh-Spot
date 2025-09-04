@@ -4,5 +4,9 @@ window.FRESHSTOP_CONFIG = {
 
   // OpenRouteService (optional fallback)
   ORS_KEY: "eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6Ijk2YmQwNmYwMDg5YjQ2YTk4NGQ3NDlmYzY5OGFiODUxIiwiaCI6Im11cm11cjY0In0="
+
+
+    TP_APP_ID: "49bf5c50",     // NEW
+    TP_APP_KEY: "adb50126ae4f422f494b8f35adce7c57"    // NEW
 };
 
