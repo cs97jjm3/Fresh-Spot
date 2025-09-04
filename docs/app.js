@@ -148,10 +148,22 @@ async function reverseGeocode(lat,lon){
 
 // ======= Selection =======
 async function setSelected([lat,lng],source=""){
-  selectedPoint=[lat,lng];
-  if(selectedMarker) selectedMarker.remove();
-  selectedMarker=L.circleMarker(selectedPoint,{radius:7,color:"#ef4444",fillColor:"#ef4444",fillOpacity:0.8}).addTo(map);
-  map.panTo(selectedPoint);
+if ("geolocation" in navigator) {
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      myLocation = [pos.coords.latitude, pos.coords.longitude];
+      // Auto-select & load all panels
+      setSelected(myLocation, "My location");
+      // Optional: also draw a small marker
+      L.circle(myLocation, { radius: 6, color: "#0ea5e9", fillColor: "#0ea5e9", fillOpacity: 0.7 }).addTo(map);
+    },
+    () => {
+      // If denied/unavailable, you still have the default map view
+    },
+    { enableHighAccuracy: true, timeout: 10000 }
+  );
+}
+
 
   // reset panels
   hide(elErrors); hide(elWeather); hide(elAir); hide(elStops); hide(elDirections);
