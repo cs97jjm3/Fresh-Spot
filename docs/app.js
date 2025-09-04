@@ -29,7 +29,7 @@ const elRouteSummary = document.getElementById("route-summary");
 const elRFMy = document.getElementById("rf-myloc");
 const elRFSel = document.getElementById("rf-selected");
 
-// Home controls
+// Home controls (search-like)
 const elHomeInput   = document.getElementById("home-input");
 const elHomeResults = document.getElementById("home-results");
 const elHomePill    = document.getElementById("home-pill");
@@ -50,14 +50,12 @@ let selectedMarker = null;
 let routeLine = null;
 let stopLayers = [];
 
-const wxNowCache = new Map();
-const hourlyCache = new Map();
+const wxNowCache = new Map();  // key: "lat,lon" ~ tile -> { temp, icon }
+const hourlyCache = new Map(); // key: tile -> [{ts,t,icon,tz},...]
 
 // ======= Home storage =======
 const HOME_KEY = "freshstop_home";
-function getHome() {
-  try { return JSON.parse(localStorage.getItem(HOME_KEY) || "null"); } catch { return null; }
-}
+function getHome() { try { return JSON.parse(localStorage.getItem(HOME_KEY) || "null"); } catch { return null; } }
 function setHome(obj) { localStorage.setItem(HOME_KEY, JSON.stringify(obj)); renderHomeUI(); }
 function clearHome() { localStorage.removeItem(HOME_KEY); renderHomeUI(); }
 function isHomeOnly() { return !!elHomeOnly?.checked; }
@@ -73,7 +71,7 @@ function renderHomeUI() {
     elHomePill.textContent = "Home";
     if (elHomeResults) { elHomeResults.style.display = "none"; elHomeResults.innerHTML = ""; }
     if (elHomeOnlyWrap) elHomeOnlyWrap.style.display = "";
-    if (elHomeOnly) elHomeOnly.checked = true;
+    if (elHomeOnly) elHomeOnly.checked = true; // default ON
   } else {
     elHomeInput.style.display = "";
     elHomePill.style.display = "none";
@@ -83,7 +81,12 @@ function renderHomeUI() {
   }
 }
 renderHomeUI();
-elHomeEdit && (elHomeEdit.onclick = () => { clearHome(); elHomeInput.value = ""; elHomeInput.focus(); });
+
+elHomeEdit && (elHomeEdit.onclick = () => {
+  clearHome();
+  elHomeInput.value = "";
+  elHomeInput.focus();
+});
 elHomeOnly && elHomeOnly.addEventListener("change", () => {
   if (selectedPoint) loadStops(selectedPoint[0], selectedPoint[1], 800);
 });
@@ -96,7 +99,8 @@ if ("geolocation" in navigator) {
       myLocation = [pos.coords.latitude, pos.coords.longitude];
       map.setView(myLocation, 14);
       L.circle(myLocation, { radius: 6, color: "#0ea5e9", fillColor: "#0ea5e9", fillOpacity: 0.7 }).addTo(map);
-    }, () => {}
+    },
+    () => {}
   );
 }
 
@@ -126,7 +130,7 @@ async function reverseGeocode(lat,lon){
   const url=`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}&addressdetails=1`;
   const d=await getJSON(url,{"Accept-Language":"en"});
   const a=d?.address||{};
-  const parts=[[a.road,a.pedestrian,a.footway,a.cycleway,a.path].find(Boolean),a.suburb||a.village,a.town||a.city,a.postcode].filter(Boolean);
+  const parts=[[a.road,a.pedestrian,a.footway,a.cycleway,a.path].find(Boolean),a.suburb||a.village||a.neighbourhood||a.hamlet,a.town||a.city||a.county,a.postcode].filter(Boolean);
   return {line:parts.join(", ")};
 }
 
@@ -136,84 +140,518 @@ async function setSelected([lat,lng],source=""){
   if(selectedMarker) selectedMarker.remove();
   selectedMarker=L.circleMarker(selectedPoint,{radius:7,color:"#ef4444",fillColor:"#ef4444",fillOpacity:0.8}).addTo(map);
   map.panTo(selectedPoint);
-  hide(elErrors); hide(elWeather); hide(elAir); hide(elStops); hide(elDirections);
-  setHTML(elWeather,"");setHTML(elAir,"");setHTML(elStopsList,"");setHTML(elDirSteps,"");
-  hide(elRouteSummary);clearStops();clearRoute();
 
-  const latTxt=lat.toFixed(5),lngTxt=lng.toFixed(5);
+  // reset panels
+  hide(elErrors); hide(elWeather); hide(elAir); hide(elStops); hide(elDirections);
+  setHTML(elWeather,""); setHTML(elAir,""); setHTML(elStopsList,""); setHTML(elDirSteps,"");
+  hide(elRouteSummary); clearStops(); clearRoute();
+
+  const latTxt=lat.toFixed(5), lngTxt=lng.toFixed(5);
   setHTML(elSelection,`<div><div style="font-weight:700;">Selected location</div><div class="muted">${latTxt}, ${lngTxt}</div></div>`);
   show(elSelection);
 
-  try{const rev=await reverseGeocode(lat,lng);if(rev.line) setHTML(elSelection,`<div><div style="font-weight:700;">Selected location</div><div>${escapeHtml(rev.line)}</div><div class="muted">${latTxt}, ${lngTxt}</div></div>`);}catch{}
+  try { const rev=await reverseGeocode(lat,lng); if(rev.line) setHTML(elSelection,`<div><div style="font-weight:700;">Selected location</div><div>${escapeHtml(rev.line)}${source?` • <span class="muted">${escapeHtml(source)}</span>`:""}</div><div class="muted">${latTxt}, ${lngTxt}</div></div>`); } catch {}
 
-  try{await Promise.all([loadWeatherAndForecast(lat,lng),loadAir(lat,lng),loadStops(lat,lng,800)]);}catch(e){showError(e.message||"Couldn’t load.");}
+  try {
+    await Promise.all([
+      loadWeatherAndForecast(lat,lng),
+      loadAir(lat,lng),
+      loadStops(lat,lng,800)
+    ]);
+  } catch(e) { showError(e.message || "Couldn’t load."); }
 }
 
-// ======= Weather =======
+// ======= Weather (now + next 2 hours) =======
 async function loadWeatherAndForecast(lat,lng){
   if(!OWM_KEY) throw new Error("Missing OpenWeatherMap key.");
+
   const wx=await getJSON(`https://api.openweathermap.org/data/2.5/weather?lat=${lat}&lon=${lng}&units=metric&appid=${OWM_KEY}`);
-  const t=Math.round(wx?.main?.temp??0);const desc=(wx?.weather?.[0]?.description||"").replace(/^\w/,c=>c.toUpperCase());const icon=wx?.weather?.[0]?.icon;
+  const t=Math.round(wx?.main?.temp??0);
+  const feels=Math.round(wx?.main?.feels_like??0);
+  const wind=Math.round(wx?.wind?.speed??0);
+  const desc=(wx?.weather?.[0]?.description||"").replace(/^\w/,c=>c.toUpperCase());
+  const place=[wx?.name,wx?.sys?.country].filter(Boolean).join(", ");
+  const icon=wx?.weather?.[0]?.icon;
+
   wxNowCache.set(roundKey(lat,lng),{temp:t,icon});
-  let hours=[];try{const one=await getJSON(`https://api.openweathermap.org/data/3.0/onecall?lat=${lat}&lon=${lng}&exclude=minutely,daily,alerts&units=metric&appid=${OWM_KEY}`);hours=(one?.hourly||[]).slice(0,3).map(h=>({ts:h.dt,t:Math.round(h.temp),icon:h.weather?.[0]?.icon,tz:one.timezone_offset||0}));}catch{}
-  setHTML(elWeather,`<div class="wx-main">${icon?`<img src="${iconUrl(icon)}" width="48">`:""}<div class="wx-temp">${t}°C</div></div><div class="wx-hours">${hours.map(h=>`<div>${hourStr(h.ts,h.tz)} ${h.t}°C</div>`).join("")}</div>`);show(elWeather);
+
+  let hours=[];
+  try {
+    const one=await getJSON(`https://api.openweathermap.org/data/3.0/onecall?lat=${lat}&lon=${lng}&exclude=minutely,daily,alerts&units=metric&appid=${OWM_KEY}`);
+    const tz = one?.timezone_offset || 0;
+    hours=(one?.hourly||[]).slice(0,3).map(h=>({ts:h.dt,t:Math.round(h.temp),icon:h.weather?.[0]?.icon,tz}));
+  } catch {
+    // fallback not strictly needed
+  }
+
+  setHTML(elWeather, `
+    <div class="wx-top">
+      <div class="wx-main">
+        ${icon ? `<img src="${iconUrl(icon)}" width="64" height="64" alt="${escapeHtml(desc)}" />` : ""}
+        <div>
+          <div class="wx-temp">${t}°C</div>
+          <div class="wx-desc">${escapeHtml(desc)} ${place ? `• <span class="pill">${escapeHtml(place)}</span>` : ""}</div>
+          <div class="muted">Feels like ${feels}°C • Wind ${wind} m/s</div>
+        </div>
+      </div>
+    </div>
+    <div style="margin-top:10px; font-weight:700;">Next 2 hours</div>
+    <div class="wx-hours">
+      ${hours.map(h=>`
+        <div class="wx-hour">
+          <div>${hourStr(h.ts,h.tz)}</div>
+          ${h.icon?`<img src="${iconUrl(h.icon)}" alt="" />`:""}
+          <div class="t">${h.t}°C</div>
+        </div>
+      `).join("")}
+    </div>
+  `);
+  show(elWeather);
 }
 
-// ======= Air =======
+// ======= Air (WOW-ish badges/bars) =======
+function aqiClass(n){switch(n){case 1:return["Good","aqi-good"];case 2:return["Fair","aqi-fair"];case 3:return["Moderate","aqi-moderate"];case 4:return["Poor","aqi-poor"];case 5:return["Very Poor","aqi-vpoor"];default:return["Unknown","aqi-moderate"];}}
+function pct(value,max){return Math.max(0,Math.min(100,Math.round((value/max)*100)));}
 async function loadAir(lat,lng){
   if(!OWM_KEY) throw new Error("Missing OpenWeatherMap key.");
   const air=await getJSON(`https://api.openweathermap.org/data/2.5/air_pollution?lat=${lat}&lon=${lng}&appid=${OWM_KEY}`);
-  const aqi=air?.list?.[0]?.main?.aqi||0;
-  setHTML(elAir,`<div>Air Quality: AQI ${aqi}</div>`);show(elAir);
+  const main=air?.list?.[0]?.main||{}, comp=air?.list?.[0]?.components||{};
+  const [label,cls]=aqiClass(main.aqi||0);
+  const scales={pm2_5:75,pm10:150,no2:200,o3:180};
+
+  setHTML(elAir, `
+    <div style="display:flex; align-items:center; justify-content:space-between;">
+      <div>
+        <div style="font-weight:700; margin-bottom:4px;">Air quality</div>
+        <div class="muted" style="font-size:12px;">OpenWeatherMap AQI (1–5)</div>
+      </div>
+      <div class="aqi-badge ${cls}">AQI ${main.aqi ?? "?"} • ${label}</div>
+    </div>
+
+    <div style="margin-top:10px; display:grid; gap:10px;">
+      ${["pm2_5","pm10","no2","o3"].map(k=>{
+        const v=comp[k]; const percentage=pct(v??0, scales[k]);
+        return `
+          <div>
+            <div class="kv"><span>${k.toUpperCase()}</span><span>${v!=null?v:"—"} μg/m³</span></div>
+            <div class="bar"><span style="width:${percentage}%;"></span></div>
+          </div>
+        `;
+      }).join("")}
+    </div>
+  `);
+  show(elAir);
 }
 
-// ======= Stops =======
+// ======= Overpass helpers =======
+async function overpass(query){
+  const res = await fetch("https://overpass-api.de/api/interpreter", {
+    method: "POST",
+    headers: {"Content-Type":"application/x-www-form-urlencoded"},
+    body: new URLSearchParams({ data: query })
+  });
+  if (!res.ok) throw new Error("Overpass busy/unavailable");
+  return await res.json();
+}
+async function fetchStopRoutes(nodeId){
+  const q = `
+[out:json][timeout:25];
+node(${nodeId});
+rel(bn)->.r;
+.r[route~"bus|tram|train|subway|light_rail"] out tags;
+`.trim();
+  const res = await fetch("https://overpass-api.de/api/interpreter", {
+    method: "POST",
+    headers: {"Content-Type":"application/x-www-form-urlencoded"},
+    body: new URLSearchParams({ data: q })
+  });
+  if (!res.ok) throw new Error("Overpass error");
+  const json = await res.json();
+  return (json.elements || []).filter(e => e.type === "relation");
+}
+
+// Home vicinity stops (for route intersection)
+async function fetchHomeAreaStops(home, radiusMeters = 600) {
+  const q = `
+[out:json][timeout:25];
+(
+  node(around:${radiusMeters},${home.lat},${home.lon})["highway"="bus_stop"];
+  node(around:${radiusMeters},${home.lat},${home.lon})["public_transport"="platform"]["bus"="yes"];
+  node(around:${radiusMeters},${home.lat},${home.lon})["railway"~"^(station|halt|stop|tram_stop)$"];
+);
+out body;
+>;
+out skel qt;
+`.trim();
+  const res = await fetch("https://overpass-api.de/api/interpreter", {
+    method: "POST",
+    headers: {"Content-Type":"application/x-www-form-urlencoded"},
+    body: new URLSearchParams({ data: q })
+  });
+  if (!res.ok) throw new Error("Overpass home-stops error");
+  const json = await res.json();
+  return (json.elements || []).filter(e => e.type === "node");
+}
+async function fetchRouteRelationsByNodes(nodeIds) {
+  if (!nodeIds.length) return [];
+  const idList = nodeIds.join(",");
+  const q = `
+[out:json][timeout:25];
+node(id:${idList});
+rel(bn)->.r;
+.r[route~"bus|tram|train|subway|light_rail"] out tags;
+`.trim();
+  const res = await fetch("https://overpass-api.de/api/interpreter", {
+    method: "POST",
+    headers: {"Content-Type":"application/x-www-form-urlencoded"},
+    body: new URLSearchParams({ data: q })
+  });
+  if (!res.ok) throw new Error("Overpass route-relations error");
+  const json = await res.json();
+  return (json.elements || []).filter(e => e.type === "relation");
+}
+
+// ======= Robust: stops whose routes also serve Home area =======
+async function getStopsTowardHomeSet(stopsNearYou, home) {
+  // 1) Stops near home
+  const homeStops = await fetchHomeAreaStops(home, 600);
+  if (!homeStops.length) {
+    return await nameHeuristicHomeSet(stopsNearYou, home); // fallback
+  }
+
+  // 2) Route relations that serve home stops
+  const homeRelObjs = await fetchRouteRelationsByNodes(homeStops.map(s => s.id));
+  const homeRelIds = new Set(homeRelObjs.map(r => r.id));
+  if (!homeRelIds.size) {
+    return await nameHeuristicHomeSet(stopsNearYou, home); // fallback
+  }
+
+  // 3) Keep nearby stops whose relations intersect homeRelIds
+  const hitIds = new Set();
+  for (const s of stopsNearYou) {
+    try {
+      const rels = await fetchStopRoutes(s.id);
+      if (rels.some(r => homeRelIds.has(r.id))) hitIds.add(s.id);
+    } catch { /* ignore individual failures */ }
+  }
+  if (hitIds.size) return hitIds;
+
+  // 4) Still nothing? fallback to name heuristic
+  return await nameHeuristicHomeSet(stopsNearYou, home);
+}
+
+// Fallback name-based heuristic (best effort)
+async function nameHeuristicHomeSet(stops, home) {
+  const tokens = (home.label || home.postcode || "")
+    .toLowerCase()
+    .split(/[\s,]+/)
+    .filter(x => x.length > 2);
+  const out = new Set();
+  for (const s of stops) {
+    try {
+      const rels = await fetchStopRoutes(s.id);
+      const hay = rels.map(r => {
+        const t = r.tags || {};
+        return [t.to, t.name, t.destination, t.via, t["name:en"]]
+          .filter(Boolean).join(" • ").toLowerCase();
+      }).join(" | ");
+      if (tokens.some(tok => hay.includes(tok))) out.add(s.id);
+    } catch {}
+  }
+  return out;
+}
+
+// ======= Stops (with filter to Home) =======
 async function loadStops(lat,lng,radius=800){
-  elStopsRadius.textContent=radius;
-  const q=`[out:json][timeout:25];(node(around:${radius},${lat},${lng})["highway"="bus_stop"];node(around:${radius},${lat},${lng})["railway"~"^(station|halt|stop|tram_stop)$"];);out body;>;out skel qt;`;
-  const data=await overpass(q);
-  let stops=(data.elements||[]).filter(e=>e.type==="node").map(e=>({id:e.id,name:e.tags.name||"Stop",pos:[e.lat,e.lon],kind:e.tags.highway?"bus":"train",dist:selectedPoint?haversine(selectedPoint,[e.lat,e.lon]):0})).sort((a,b)=>a.dist-b.dist).slice(0,12);
+  elStopsRadius.textContent = radius;
+  const q = `
+[out:json][timeout:25];
+(
+  node(around:${radius},${lat},${lng})["highway"="bus_stop"];
+  node(around:${radius},${lat},${lng})["public_transport"="platform"]["bus"="yes"];
+  node(around:${radius},${lat},${lng})["railway"~"^(station|halt|stop|tram_stop)$"];
+);
+out body;
+>;
+out skel qt;
+`.trim();
 
-  const home=getHome();let homeSet=null;
-  if(home&&isHomeOnly()){homeSet=await getStopsTowardHomeSet(stops,home);stops=stops.filter(s=>homeSet.has(s.id));}
-  if(!stops.length){setHTML(elStopsList,`<div class="muted">No nearby stops found to Home.</div>`);show(elStops);clearStops();return;}
+  const data = await overpass(q);
+  let stops = (data.elements || [])
+    .filter(e => e.type === "node")
+    .map(e => {
+      const tags = e.tags || {};
+      const isBus = tags.highway === "bus_stop" || tags.bus === "yes";
+      const isTrain = /^station|halt|stop|tram_stop$/.test(tags.railway || "");
+      return {
+        id: e.id,
+        name: tags.name || (isBus ? "Bus stop" : "Station"),
+        kind: isTrain ? "train" : "bus",
+        pos: [e.lat, e.lon],
+        dist: selectedPoint ? haversine(selectedPoint, [e.lat, e.lon]) : 0
+      };
+    })
+    .sort((a,b)=>a.dist-b.dist)
+    .slice(0, 12);
 
-  clearStops();stops.forEach(s=>{L.circleMarker(s.pos,{radius:6,color:s.kind==="bus"?"#0ea5e9":"#10b981",fillOpacity:.85}).addTo(map);});
-  setHTML(elStopsList,stops.map(s=>`<div>${escapeHtml(s.name)} ${homeSet&&homeSet.has(s.id)?'<span class="pill">→ Home</span>':""} <button data-route="${s.id}">Route</button><div id="wx-${s.id}"></div></div>`).join(""));show(elStops);
+  const home = getHome();
+  let homeSet = null;
+  if (home && isHomeOnly()) {
+    homeSet = await getStopsTowardHomeSet(stops, home);
+    stops = stops.filter(s => homeSet.has(s.id));
+  }
 
-  [...elStopsList.querySelectorAll("button[data-route]")].forEach(b=>b.onclick=async()=>{const origin=await getOrigin();const s=stops.find(x=>x.id==b.dataset.route);routeBetween(origin,s.pos);});
+  if (!stops.length) {
+    setHTML(elStopsList, `
+      <div class="muted" style="padding:8px;">
+        No nearby stops found that clearly reach your Home area.
+        Try turning off “Only stops to Home” or zooming out.
+      </div>
+    `);
+    show(elStops);
+    clearStops();
+    return;
+  }
+
+  // Draw markers
+  clearStops();
+  for (const s of stops) {
+    const color = s.kind === "bus" ? "#0ea5e9" : "#10b981";
+    const m = L.circleMarker(s.pos, { radius: 6, color, fillColor: color, fillOpacity: 0.85 })
+      .addTo(map)
+      .bindTooltip(`${s.name} (${s.kind})`);
+    stopLayers.push(m);
+  }
+
+  // Render list
+  setHTML(elStopsList, stops.map(s => `
+    <div class="stop-item" data-stop="${s.id}">
+      <div class="stop-left">
+        <div class="stop-wx" id="wx-${s.id}"><span class="muted">…</span></div>
+        <div>
+          <div class="stop-name">
+            ${escapeHtml(s.name)}
+            ${homeSet && homeSet.has(s.id) ? `<span class="pill" style="margin-left:6px;">→ Home</span>` : ""}
+          </div>
+          <div class="muted" style="font-size:12px;">${s.kind === "bus" ? "Bus stop" : "Train/Tram"} • ${Math.round(s.dist)} m</div>
+        </div>
+      </div>
+      <div style="display:flex; gap:6px; align-items:center;">
+        <span class="stop-kind ${s.kind === "bus" ? "kind-bus" : "kind-train"}">${s.kind}</span>
+        <button class="btn" data-route="${s.id}" title="Route from chosen origin to this stop">Route</button>
+      </div>
+    </div>
+  `).join(""));
+  show(elStops);
+
+  // Per-stop tiny weather
+  await fillStopsWeather(stops);
+
+  // Wire route buttons
+  [...elStopsList.querySelectorAll("button[data-route]")].forEach(btn => {
+    btn.onclick = async () => {
+      hide(elErrors);
+      try {
+        const origin = await getOrigin();
+        const id = btn.getAttribute("data-route");
+        const s = stops.find(x => x.id.toString() === id);
+        if (!s) return;
+        routeBetween(origin, s.pos);
+      } catch (err) {
+        showError(err.message || "Couldn’t start routing.");
+      }
+    };
+  });
 }
 
-async function getStopsTowardHomeSet(stops,home){
-  const tokens=(home.label||"").toLowerCase().split(/[, ]+/).filter(x=>x.length>2);
-  const ids=new Set();
-  for(const s of stops){try{const rels=await fetchStopRoutes(s.id);if(rels.some(r=>tokens.some(t=>(r.tags.name||"").toLowerCase().includes(t))))ids.add(s.id);}catch{}}
-  return ids;
-}
-async function fetchStopRoutes(id){const q=`[out:json];node(${id});rel(bn)->.r;.r[route] out tags;`;const r=await fetch("https://overpass-api.de/api/interpreter",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:new URLSearchParams({data:q})});const j=await r.json();return j.elements||[];}
+async function fillStopsWeather(stops) {
+  const MAX_FETCH = 8;
+  let remaining = MAX_FETCH;
 
-function clearStops(){stopLayers.forEach(l=>l.remove());stopLayers=[];}
-async function overpass(q){const r=await fetch("https://overpass-api.de/api/interpreter",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:new URLSearchParams({data:q})});return await r.json();}
+  for (const s of stops) {
+    const key = roundKey(s.pos[0], s.pos[1]);
+    let wx = wxNowCache.get(key);
+    if (!wx && remaining > 0) {
+      try {
+        const w = await getJSON(`https://api.openweathermap.org/data/2.5/weather?lat=${s.pos[0]}&lon=${s.pos[1]}&units=metric&appid=${OWM_KEY}`);
+        wx = { temp: Math.round(w?.main?.temp ?? 0), icon: w?.weather?.[0]?.icon };
+        wxNowCache.set(key, wx);
+        remaining--;
+      } catch { /* ignore */ }
+    }
+    const el = document.getElementById(`wx-${s.id}`);
+    if (!el) continue;
+    if (wx && wx.icon != null) {
+      el.innerHTML = `<img src="${iconUrl(wx.icon)}" alt="" /><strong>${wx.temp}°C</strong>`;
+    } else {
+      el.innerHTML = `<span class="pill">n/a</span>`;
+    }
+  }
+}
 
 // ======= Routing =======
-elBtnRoute.onclick=async()=>{if(!selectedPoint)return showError("Pick a destination.");const origin=await getOrigin();routeBetween(origin,selectedPoint);};
-elBtnRouteHome&& (elBtnRouteHome.onclick=async()=>{const home=getHome();if(!home)return showError("Set Home first.");const origin=await getOrigin();routeBetween(origin,[home.lat,home.lon]);});
-elBtnClearRoute&&(elBtnClearRoute.onclick=()=>{clearRoute();hide(elDirections);hide(elRouteSummary);});
-function clearRoute(){if(routeLine)routeLine.remove();routeLine=null;setHTML(elDirSteps,"");}
+elBtnRoute.onclick = async () => {
+  hide(elErrors); hide(elRouteSummary);
+  try {
+    if (!selectedPoint) throw new Error("Pick a destination on the map (or via search) first.");
+    const origin = await getOrigin();
+    routeBetween(origin, selectedPoint);
+  } catch (err) { showError(err.message || "Couldn’t start routing."); }
+};
+elBtnRouteHome && (elBtnRouteHome.onclick = async () => {
+  const home = getHome(); if (!home) return showError("Set Home first (top bar).");
+  hide(elErrors); hide(elRouteSummary);
+  try {
+    const origin = await getOrigin();
+    routeBetween(origin, [home.lat, home.lon]);
+  } catch (e) { showError(e.message || "Couldn’t start routing to Home."); }
+});
+elBtnClearRoute && (elBtnClearRoute.onclick = () => { clearRoute(); hide(elDirections); hide(elRouteSummary); });
 
-async function routeBetween(from,to){try{const r=await routeOSRM(from,to);drawRoute(r);}catch{showError("Routing failed.");}}
-async function routeOSRM(from,to){const u=`https://router.project-osrm.org/route/v1/foot/${from[1]},${from[0]};${to[1]},${to[0]}?overview=full&geometries=geojson&steps=true`;const d=await getJSON(u);const r=d?.routes?.[0];return{coords:r.geometry.coordinates.map(([x,y])=>[y,x]),distance:r.distance,duration:r.duration,steps:[]};}
-function drawRoute(r){if(routeLine)routeLine.remove();routeLine=L.polyline(r.coords,{weight:5}).addTo(map);map.fitBounds(L.latLngBounds(r.coords));elRouteSummary.textContent=`${km(r.distance)} km • ${minutes(r.duration)} min`;show(elRouteSummary);}
+function clearRoute(){ if(routeLine) routeLine.remove(); routeLine=null; setHTML(elDirSteps,""); }
 
-// ======= Search =======
-let searchTimer;elSearch.addEventListener("input",()=>{clearTimeout(searchTimer);const q=elSearch.value.trim();if(q.length<3)return hide(elResults);searchTimer=setTimeout(()=>doSearch(q),350);});
-async function doSearch(q){const u=`https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=6&q=${encodeURIComponent(q)}`;const d=await getJSON(u,{"Accept-Language":"en"});if(!d.length)return hide(elResults);elResults.innerHTML=d.map(r=>`<button data-lat="${r.lat}" data-lon="${r.lon}">${r.display_name}</button>`).join("");show(elResults);[...elResults.querySelectorAll("button")].forEach(b=>b.onclick=()=>{setSelected([+b.dataset.lat,+b.dataset.lon],"search");hide(elResults);});}
+async function routeBetween(from,to){
+  try {
+    const r = await routeOSRM(from, to);
+    drawRoute(r);
+  } catch (e1) {
+    if (ORS_KEY) {
+      try { const r = await routeORS(from, to, ORS_KEY); drawRoute(r); }
+      catch (e2) { showError("Routing failed (OSRM & ORS)."); }
+    } else {
+      showError("Routing failed (OSRM). You can add an ORS key for fallback.");
+    }
+  }
+}
 
-// ======= Home search =======
-let homeTimer;if(elHomeInput&&elHomeResults){elHomeInput.addEventListener("input",()=>{clearTimeout(homeTimer);const q=elHomeInput.value.trim();if(q.length<3)return elHomeResults.style.display="none";homeTimer=setTimeout(()=>doHomeSearch(q),350);});}
-async function doHomeSearch(q){const u=`https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=6&q=${encodeURIComponent(q)}`;const d=await getJSON(u,{"Accept-Language":"en"});if(!d.length)return elHomeResults.style.display="none";elHomeResults.innerHTML=d.map(r=>`<button data-lat="${r.lat}" data-lon="${r.lon}" data-display="${r.display_name}">${r.display_name}</button>`).join("");elHomeResults.style.display="";[...elHomeResults.querySelectorAll("button")].forEach(b=>b.onclick=()=>{setHome({lat:+b.dataset.lat,lon:+b.dataset.lon,label:b.dataset.display});elHomeInput.value="";elHomeResults.style.display="none";});}
+async function routeOSRM(from,to){
+  const url=`https://router.project-osrm.org/route/v1/foot/${from[1]},${from[0]};${to[1]},${to[0]}?overview=full&geometries=geojson&steps=true`;
+  const data=await getJSON(url);
+  const r=data?.routes?.[0]; if(!r) throw new Error("No OSRM route");
+  const coords=r.geometry.coordinates.map(([lng,lat])=>[lat,lng]);
+  const steps=(r.legs?.[0]?.steps||[]).map(osrmStepToText);
+  return { coords, distance:r.distance, duration:r.duration, steps };
+}
+function osrmStepToText(step){
+  const m=step.maneuver||{}; const type=m.type||"continue";
+  const mod=m.modifier?` ${m.modifier}`:"";
+  const road=step.name?` onto ${step.name}`:"";
+  const dist=step.distance?` (${Math.round(step.distance)} m)`:"";
+  switch(type){
+    case "depart": return `Start${road}${dist}`;
+    case "arrive": return `Arrive at destination${dist}`;
+    case "roundabout": return `Enter roundabout and take exit${dist}`;
+    case "fork": return `Keep${mod}${road}${dist}`;
+    case "turn": return `Turn${mod}${road}${dist}`;
+    case "new name": return `Continue${road}${dist}`;
+    case "merge": return `Merge${road}${dist}`;
+    case "end of road": return `End of road, turn${mod}${road}${dist}`;
+    default: return `Continue${road}${dist}`;
+  }
+}
+async function routeORS(from,to,key){
+  const url="https://api.openrouteservice.org/v2/directions/foot-walking/geojson";
+  const res=await fetch(url,{method:"POST",headers:{"Authorization":key,"Content-Type":"application/json"},body:JSON.stringify({coordinates:[[from[1],from[0]],[to[1],to[0]]],instructions:true})});
+  if(!res.ok) throw new Error("ORS error");
+  const data=await res.json();
+  const feat=data?.features?.[0];
+  const coords=feat?.geometry?.coordinates?.map(([lng,lat])=>[lat,lng])||[];
+  const sum=feat?.properties?.summary||{};
+  const raw=feat?.properties?.segments?.[0]?.steps||[];
+  const steps=raw.map(orsStepToText);
+  if(!coords.length) throw new Error("No ORS route");
+  return { coords, distance:sum.distance??0, duration:sum.duration??0, steps };
+}
+function orsStepToText(step){
+  const name=step.name?` onto ${step.name}`:"";
+  const dist=step.distance?` (${Math.round(step.distance)} m)`:"";
+  const text=step.instruction||step.type||"Continue";
+  return `${text}${name}${dist}`;
+}
+function drawRoute(route){
+  const { coords, distance, duration, steps } = route;
+  if(routeLine) routeLine.remove();
+  routeLine=L.polyline(coords,{weight:5}).addTo(map);
+  map.fitBounds(L.latLngBounds(coords),{padding:[20,20]});
+  elRouteSummary.textContent=`Distance: ${km(distance)} km • Time: ${minutes(duration)} min`;
+  show(elRouteSummary);
+  if(steps && steps.length){
+    setHTML(elDirSteps, steps.map((s,i)=>`<div class="dir-step">${i+1}. ${escapeHtml(s)}</div>`).join(""));
+    show(elDirections);
+  } else {
+    hide(elDirections);
+  }
+}
+
+// ======= Search (places) =======
+let searchTimer;
+elSearch.addEventListener("input",()=>{
+  clearTimeout(searchTimer);
+  const q=elSearch.value.trim();
+  if(q.length<3){ hide(elResults); elResults.innerHTML=""; return; }
+  searchTimer=setTimeout(()=>doSearch(q),350);
+});
+async function doSearch(q){
+  const url=`https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=6&q=${encodeURIComponent(q)}`;
+  try{
+    const data=await getJSON(url,{"Accept-Language":"en"});
+    if(!Array.isArray(data)||!data.length){ hide(elResults); elResults.innerHTML=""; return; }
+    elResults.innerHTML=data.map(row=>`
+      <button data-lat="${row.lat}" data-lon="${row.lon}">
+        ${row.display_name.replaceAll("&","&amp;")}
+      </button>
+    `).join("");
+    show(elResults);
+    [...elResults.querySelectorAll("button")].forEach(btn=>{
+      btn.onclick=()=>{
+        const lat=parseFloat(btn.dataset.lat);
+        const lon=parseFloat(btn.dataset.lon);
+        setSelected([lat,lon],"search");
+        hide(elResults); elResults.innerHTML="";
+      };
+    });
+  }catch{ hide(elResults); }
+}
+// close results when clicking outside
+document.addEventListener("click",(e)=>{ if(!elResults.contains(e.target) && e.target!==elSearch) hide(elResults); });
+
+// ======= Home autocomplete =======
+let homeTimer;
+if(elHomeInput && elHomeResults){
+  elHomeInput.addEventListener("input",()=>{
+    clearTimeout(homeTimer);
+    const q=elHomeInput.value.trim();
+    if(!q || q.length<3){ elHomeResults.style.display="none"; elHomeResults.innerHTML=""; return; }
+    homeTimer=setTimeout(()=>doHomeSearch(q),350);
+  });
+  document.addEventListener("click",(e)=>{ if(!elHomeResults.contains(e.target) && e.target!==elHomeInput){ elHomeResults.style.display="none"; } });
+}
+async function doHomeSearch(q){
+  const url=`https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=6&q=${encodeURIComponent(q)}`;
+  try{
+    const data=await getJSON(url,{"Accept-Language":"en"});
+    if(!Array.isArray(data)||!data.length){ elHomeResults.style.display="none"; elHomeResults.innerHTML=""; return; }
+    elHomeResults.innerHTML=data.map(row=>`
+      <button data-lat="${row.lat}" data-lon="${row.lon}" data-display="${(row.display_name||"").replaceAll('"',"&quot;")}">
+        ${row.display_name.replaceAll("&","&amp;")}
+      </button>
+    `).join("");
+    elHomeResults.style.display="";
+    [...elHomeResults.querySelectorAll("button")].forEach(btn=>{
+      btn.onclick=()=>{
+        const lat=+btn.dataset.lat, lon=+btn.dataset.lon;
+        const display=btn.dataset.display || "";
+        setHome({ lat, lon, label: display });
+        elHomeInput.value="";
+        elHomeResults.style.display="none"; elHomeResults.innerHTML="";
+        // If we already have a selection on map, refresh stops with the new filter
+        if (selectedPoint) loadStops(selectedPoint[0], selectedPoint[1], 800);
+      };
+    });
+  }catch{ elHomeResults.style.display="none"; }
+}
 
 // ======= Generic helpers =======
-async function getJSON(u,h={}){const r=await fetch(u,{headers:{...h}});if(!r.ok)throw new Error(r.statusText);return await r.json();}
-function getCurrentPosition(){return new Promise((res,rej)=>navigator.geolocation.getCurrentPosition(res,rej));}
-function showError(m){setHTML(elErrors,`⚠️ ${m}`);show(elErrors);}
+async function getJSON(u,h={}){ const r=await fetch(u,{headers:{...h}}); if(!r.ok) throw new Error(`${r.status} ${r.statusText}`); return await r.json(); }
+function getCurrentPosition(){ return new Promise((resolve,reject)=>{ if(!navigator.geolocation) return reject(new Error("Geolocation unsupported")); navigator.geolocation.getCurrentPosition(resolve,reject,{enableHighAccuracy:true,timeout:10000}); }); }
+function showError(m){ setHTML(elErrors,`⚠️ ${m}`); show(elErrors); }
