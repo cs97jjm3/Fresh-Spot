@@ -726,12 +726,16 @@ async function doHomeSearch(q) {
   const url = `https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=6&q=${encodeURIComponent(q)}`;
   try {
     const data = await getJSON(url, { "Accept-Language": "en" });
-    if (!Array.isArray(data) || !data.length) { elHomeResults.style.display = "none"; elHomeResults.innerHTML = ""; return; }
+    if (!Array.isArray(data) || !data.length) {
+      elHomeResults.style.display = "none";
+      elHomeResults.innerHTML = "";
+      return;
+    }
     elHomeResults.innerHTML = data.map(row => `
       <button data-lat="${row.lat}" data-lon="${row.lon}" data-display="${(row.display_name || "").replaceAll('"',"&quot;")}">
         ${row.display_name.replaceAll("&","&amp;")}
       </button>
-    ).join("");
+    `).join("");
     elHomeResults.style.display = "";
 
     [...elHomeResults.querySelectorAll("button")].forEach(btn => {
@@ -739,8 +743,7 @@ async function doHomeSearch(q) {
         const lat = parseFloat(btn.dataset.lat);
         const lon = parseFloat(btn.dataset.lon);
         const display = btn.dataset.display || "";
-        const label = labelFromAddress(rowAddress(btn), display);
-        setHome({ lat, lon, postcode: "", label });
+        setHome({ lat, lon, postcode: "", label: display });
         elHomeInput.value = "";
         elHomeResults.style.display = "none";
         elHomeResults.innerHTML = "";
@@ -749,6 +752,8 @@ async function doHomeSearch(q) {
   } catch {
     elHomeResults.style.display = "none";
   }
+}
+
 
   function rowAddress(btn) {
     // We didn't embed full address JSON in the button; labelFromAddress will fall back to display string.
