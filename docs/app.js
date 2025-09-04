@@ -414,4 +414,193 @@ async function routeFoot(from, to) {
 
   // Fallback to ORS if key exists
   if (ORS_KEY) {
-    const res = await fetc
+    const res = await fetch(ORS, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": ORS_KEY },
+      body: JSON.stringify({
+        coordinates: [[from.lon, from.lat], [to.lon, to.lat]],
+        instructions: true,
+      })
+    });
+    if (res.ok) {
+      const data = await res.json();
+      const feat = data.features?.[0];
+      if (feat) {
+        const seg = feat.properties.segments?.[0];
+        return {
+          geometry: feat.geometry,
+          distance: seg.distance,
+          duration: seg.duration,
+          steps: seg.steps?.map(s => s.instruction) || [],
+        };
+      }
+    }
+  }
+
+  throw new Error("Routing failed");
+}
+
+function clearRoute() {
+  elDirections.style.display = "none";
+  elDirSteps.innerHTML = "";
+  if (STATE.layerRoute) {
+    STATE.layerRoute.clearLayers();
+  }
+}
+
+function showRoute(route, from, to) {
+  clearRoute();
+  // Draw line
+  const coords = route.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
+  L.polyline(coords, { color: "#0ea5e9", weight: 5, opacity: 0.9 }).addTo(STATE.layerRoute);
+
+  // Fit
+  STATE.map.fitBounds(L.latLngBounds([ [from.lat, from.lon], [to.lat, to.lon] ]));
+
+  // Steps
+  elDirections.style.display = "block";
+  const mins = Math.round(route.duration / 60);
+  const dist = fmtDist(route.distance);
+  const header = document.createElement("div");
+  header.className = "muted";
+  header.textContent = `~${mins} min • ${dist}`;
+  elDirSteps.innerHTML = "";
+  elDirSteps.appendChild(header);
+
+  route.steps.forEach((t) => {
+    const p = document.createElement("div");
+    p.className = "dir-step";
+    p.textContent = t;
+    elDirSteps.appendChild(p);
+  });
+}
+
+// -----------------------------
+// Selection & flow
+// -----------------------------
+function showSelection(point, label) {
+  elSelection.style.display = "block";
+  elSelection.innerHTML = `
+    <div class="kv">
+      <div><strong>${label}</strong></div>
+      <div class="muted">${toFixed(point.lat,4)}, ${toFixed(point.lon,4)}</div>
+    </div>
+  `;
+}
+
+async function chooseStopAndRoute(me, stop) {
+  // Marker
+  if (STATE.selectedStopMarker) STATE.map.removeLayer(STATE.selectedStopMarker);
+  STATE.selectedStopMarker = L.marker([stop.lat, stop.lon], { title: stop.name })
+    .addTo(STATE.map)
+    .bindPopup(stop.name)
+    .openPopup();
+
+  // Weather/Air (me & stop)
+  showWeatherAndAir(me, stop).catch((e)=>setError(e.message));
+
+  // Route
+  try {
+    const r = await routeFoot(me, { lat: stop.lat, lon: stop.lon });
+    showRoute(r, me, { lat: stop.lat, lon: stop.lon });
+  } catch (err) {
+    setError(err.message);
+  }
+}
+
+async function computeBestStopToHome() {
+  setError("");
+  // Preconditions
+  if (!STATE.home) {
+    setError("Please set your Home first.");
+    return;
+  }
+  if (!STATE.me) {
+    await locateMe(); // tries to fill STATE.me
+    if (!STATE.me) { setError("Couldn’t get your location."); return; }
+  }
+
+  // Fetch stops around your current location
+  let stops = [];
+  try {
+    stops = await fetchNearbyStops(STATE.me, STOPS_RADIUS_M);
+  } catch (err) {
+    setError(err.message);
+    return;
+  }
+  if (!stops.length) {
+    setError("No stops found nearby.");
+    return;
+  }
+
+  // Score & pick best
+  const best = pickBestStop(STATE.me, STATE.home, stops);
+
+  // Render list (with Best badge)
+  renderStopsList(STATE.me, STATE.home, stops, best);
+
+  // Auto-pick best & route
+  await chooseStopAndRoute(STATE.me, best);
+}
+
+// -----------------------------
+// Geolocation
+// -----------------------------
+async function locateMe() {
+  return new Promise((resolve) => {
+    if (!navigator.geolocation) {
+      setError("Geolocation not supported.");
+      resolve(null);
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const { latitude, longitude } = pos.coords;
+        STATE.me = { lat: latitude, lon: longitude };
+        placeMeMarker(STATE.me);
+        // Center map (don’t zoom too aggressively if already set)
+        const z = STATE.map.getZoom();
+        STATE.map.setView([latitude, longitude], Math.max(z, 15));
+        resolve(STATE.me);
+      },
+      (err) => {
+        setError(err.message || "Couldn’t get location.");
+        resolve(null);
+      },
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 30000 }
+    );
+  });
+}
+
+// -----------------------------
+// Wire up UI
+// -----------------------------
+function wireUI() {
+  elSearch.addEventListener("input", handleSearchInput);
+  elHomeInput.addEventListener("input", handleHomeInput);
+
+  elHomeEdit.addEventListener("click", () => {
+    // Reveal the home input (just focus it)
+    elHomeInput.focus();
+  });
+
+  elBtnMyLoc.addEventListener("click", locateMe);
+
+  elBtnBestHome.addEventListener("click", computeBestStopToHome);
+
+  // Clear route button (already in DOM)
+  const elClear = $("#btn-clear-route");
+  if (elClear) elClear.addEventListener("click", clearRoute);
+}
+
+// -----------------------------
+// Boot
+// -----------------------------
+(async function boot() {
+  initMap();
+  wireUI();
+
+  // If user already allowed location before, try immediately
+  // (Some browsers will still prompt)
+  try { await locateMe(); } catch { /* ignore */ }
+})();
