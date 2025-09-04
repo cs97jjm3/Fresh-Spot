@@ -126,15 +126,16 @@
         </div>
       </div>
       <!-- Home setup/display (enter once, then saved) -->
-<div id="home-setup" class="row" style="margin-left:12px; gap:6px;">
-  <input id="home-input" type="text" placeholder="Set Home (address or postcode) — one-time" style="padding:8px 10px; border:1px solid #e5e7eb; border-radius:10px; width:260px;" />
-  <button id="home-save" class="btn">Save</button>
+<!-- Home (one-time) — same UX as search -->
+<div class="search" style="max-width: 360px; margin-left:12px;">
+  <input id="home-input" type="text" placeholder="Set Home (address or postcode)…" />
+  <div id="home-results" class="dropdown" style="display:none;"></div>
 </div>
 
-<div id="home-view" class="row" style="margin-left:12px; gap:6px; display:none;">
-  <span id="home-display" class="pill"></span>
-  <button id="home-edit" class="btn">Change</button>
-</div>
+<!-- Shows after you pick Home once -->
+<span id="home-pill" class="pill" style="display:none; margin-left:8px;"></span>
+<button id="home-edit" class="btn" style="display:none;">Change</button>
+
 
     </header>
 
