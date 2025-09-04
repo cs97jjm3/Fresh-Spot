@@ -5,9 +5,7 @@ const ORS_KEY    = CONFIG.ORS_KEY;
 const TP_APP_ID  = CONFIG.TP_APP_ID;   // optional for live times
 const TP_APP_KEY = CONFIG.TP_APP_KEY;  // optional
 
-if (!OWM_KEY) {
-  console.warn("Missing OWM_KEY. Create config.js with window.FRESHSTOP_CONFIG.");
-}
+if (!OWM_KEY) console.warn("Missing OWM_KEY. Create config.js with window.FRESHSTOP_CONFIG.");
 
 // ======= Elements =======
 const elSearch = document.getElementById("search");
@@ -30,7 +28,7 @@ const elRouteSummary = document.getElementById("route-summary");
 const elRFMy = document.getElementById("rf-myloc");
 const elRFSel = document.getElementById("rf-selected");
 
-// Home controls (search-like)
+// Home controls
 const elHomeInput    = document.getElementById("home-input");
 const elHomeResults  = document.getElementById("home-results");
 const elHomePill     = document.getElementById("home-pill");
@@ -54,9 +52,12 @@ let stopLayers = [];
 const wxNowCache = new Map();   // tile -> {temp, icon}
 const hourlyCache = new Map();  // tile -> [{ts,t,icon,tz}...]
 
+// Ordered relation member cache (for direction)
+const relMembersCache = new Map(); // relationId -> [nodeId,...]
+
 // ======= Units: miles & mph =======
-function miles(meters) { return (meters / 1609.344).toFixed(2); }
-function mph(ms)      { return Math.round(ms * 2.236936); }
+function miles(m) { return (m / 1609.344).toFixed(2); }
+function mph(ms)  { return Math.round(ms * 2.236936); }
 
 // ======= Home storage =======
 const HOME_KEY = "freshstop_home";
@@ -68,7 +69,6 @@ function isHomeOnly() { return !!elHomeOnly?.checked; }
 function renderHomeUI() {
   const home = getHome();
   if (!elHomeInput || !elHomePill || !elHomeEdit) return;
-
   if (home) {
     elHomeInput.style.display = "none";
     elHomePill.style.display = "";
@@ -76,7 +76,7 @@ function renderHomeUI() {
     elHomePill.textContent = "Home";
     if (elHomeResults) { elHomeResults.style.display = "none"; elHomeResults.innerHTML = ""; }
     if (elHomeOnlyWrap) elHomeOnlyWrap.style.display = "";
-    if (elHomeOnly) elHomeOnly.checked = true; // default ON
+    if (elHomeOnly) elHomeOnly.checked = true;
   } else {
     elHomeInput.style.display = "";
     elHomePill.style.display = "none";
@@ -98,14 +98,17 @@ elHomeOnly && elHomeOnly.addEventListener("change", () => {
 
 // ======= Map interactions =======
 map.on("click", (e) => setSelected([e.latlng.lat, e.latlng.lng], "(map click)"));
+
+// Auto-select device location on load
 if ("geolocation" in navigator) {
   navigator.geolocation.getCurrentPosition(
     (pos) => {
       myLocation = [pos.coords.latitude, pos.coords.longitude];
-      map.setView(myLocation, 14);
+      setSelected(myLocation, "My location");
       L.circle(myLocation, { radius: 6, color: "#0ea5e9", fillColor: "#0ea5e9", fillOpacity: 0.7 }).addTo(map);
     },
-    () => {}
+    () => {},
+    { enableHighAccuracy: true, timeout: 10000 }
   );
 }
 
@@ -130,12 +133,7 @@ async function getOrigin(){
 }
 
 // Remove all stop markers
-function clearStops() {
-  for (const layer of stopLayers) {
-    try { layer.remove(); } catch {}
-  }
-  stopLayers = [];
-}
+function clearStops() { for (const l of stopLayers){ try{ l.remove(); }catch{} } stopLayers = []; }
 
 // ======= Reverse geocode =======
 async function reverseGeocode(lat,lon){
@@ -148,24 +146,11 @@ async function reverseGeocode(lat,lon){
 
 // ======= Selection =======
 async function setSelected([lat,lng],source=""){
-if ("geolocation" in navigator) {
-  navigator.geolocation.getCurrentPosition(
-    (pos) => {
-      myLocation = [pos.coords.latitude, pos.coords.longitude];
-      // Auto-select & load all panels
-      setSelected(myLocation, "My location");
-      // Optional: also draw a small marker
-      L.circle(myLocation, { radius: 6, color: "#0ea5e9", fillColor: "#0ea5e9", fillOpacity: 0.7 }).addTo(map);
-    },
-    () => {
-      // If denied/unavailable, you still have the default map view
-    },
-    { enableHighAccuracy: true, timeout: 10000 }
-  );
-}
+  selectedPoint=[lat,lng];
+  if(selectedMarker) selectedMarker.remove();
+  selectedMarker=L.circleMarker(selectedPoint,{radius:7,color:"#ef4444",fillColor:"#ef4444",fillOpacity:0.8}).addTo(map);
+  map.panTo(selectedPoint);
 
-
-  // reset panels
   hide(elErrors); hide(elWeather); hide(elAir); hide(elStops); hide(elDirections);
   setHTML(elWeather,""); setHTML(elAir,""); setHTML(elStopsList,""); setHTML(elDirSteps,"");
   hide(elRouteSummary); clearStops(); clearRoute();
@@ -185,7 +170,7 @@ if ("geolocation" in navigator) {
   } catch(e) { showError(e.message || "Couldn’t load."); }
 }
 
-// ======= Weather (now + next 2 hours) =======
+// ======= Weather (colourful; hide hours if absent) =======
 async function loadWeatherAndForecast(lat,lng){
   if(!OWM_KEY) throw new Error("Missing OpenWeatherMap key.");
 
@@ -205,7 +190,7 @@ async function loadWeatherAndForecast(lat,lng){
     return;
   }
 
-  // Hourly: try 3.0 → fallback to 2.5 → else none
+  // Hourly: try 3.0 → fallback to 2.5
   let hours=[];
   try {
     const one=await getJSON(`https://api.openweathermap.org/data/3.0/onecall?lat=${lat}&lon=${lng}&exclude=minutely,daily,alerts&units=metric&appid=${OWM_KEY}`);
@@ -216,7 +201,7 @@ async function loadWeatherAndForecast(lat,lng){
       const old=await getJSON(`https://api.openweathermap.org/data/2.5/onecall?lat=${lat}&lon=${lng}&exclude=minutely,daily,alerts&units=metric&appid=${OWM_KEY}`);
       const tz = old?.timezone_offset || 0;
       hours=(old?.hourly||[]).slice(0,3).map(h=>({ts:h.dt,t:Math.round(h.temp),icon:h.weather?.[0]?.icon,tz}));
-    } catch { /* no hourly */ }
+    } catch {}
   }
 
   const hoursBlock = (hours && hours.length)
@@ -231,8 +216,7 @@ async function loadWeatherAndForecast(lat,lng){
           </div>
         `).join("")}
       </div>
-    `
-    : ""; // hide entirely if nothing
+    ` : "";
 
   setHTML(elWeather, `
     <div class="wx-card">
@@ -250,8 +234,7 @@ async function loadWeatherAndForecast(lat,lng){
   show(elWeather);
 }
 
-
-// ======= Air (WOW-ish badges/bars) =======
+// ======= Air (WOW-ish) =======
 function aqiClass(n){switch(n){case 1:return["Good","aqi-good"];case 2:return["Fair","aqi-fair"];case 3:return["Moderate","aqi-moderate"];case 4:return["Poor","aqi-poor"];case 5:return["Very Poor","aqi-vpoor"];default:return["Unknown","aqi-moderate"];}}
 function pct(value,max){return Math.max(0,Math.min(100,Math.round((value/max)*100)));}
 async function loadAir(lat,lng){
@@ -270,7 +253,6 @@ async function loadAir(lat,lng){
         </div>
         <div class="aqi-badge ${cls}">AQI ${main.aqi ?? "?"} • ${label}</div>
       </div>
-
       <div style="margin-top:10px; display:grid; gap:10px;">
         ${["pm2_5","pm10","no2","o3"].map(k=>{
           const v=comp[k]; const percentage=pct(v??0, scales[k]);
@@ -306,7 +288,7 @@ async function overpass(query){
       });
       if (!res.ok) continue;
       return await res.json();
-    } catch { /* try next */ }
+    } catch { }
   }
   throw new Error("Overpass busy/unavailable");
 }
@@ -320,11 +302,7 @@ rel(bn)->.r;
 `.trim();
   for (const url of OVERPASS_URLS) {
     try {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: {"Content-Type":"application/x-www-form-urlencoded"},
-        body: new URLSearchParams({ data: q })
-      });
+      const res = await fetch(url, { method:"POST", headers:{"Content-Type":"application/x-www-form-urlencoded"}, body:new URLSearchParams({ data:q }) });
       if (!res.ok) continue;
       const json = await res.json();
       return (json.elements || []).filter(e => e.type === "relation");
@@ -333,14 +311,35 @@ rel(bn)->.r;
   return []; // soft-fail
 }
 
-// Read route relations serving MANY nodes (chunked)
+// Relation members (ordered) for direction check
+async function fetchRelationMembersOrdered(relationId) {
+  if (relMembersCache.has(relationId)) return relMembersCache.get(relationId);
+  const q = ` [out:json][timeout:30]; rel(${relationId}); out body; `.trim();
+  for (const url of OVERPASS_URLS) {
+    try {
+      const res = await fetch(url, { method:"POST", headers:{"Content-Type":"application/x-www-form-urlencoded"}, body:new URLSearchParams({ data:q }) });
+      if (!res.ok) continue;
+      const json = await res.json();
+      const rel = (json.elements || []).find(e => e.type === "relation");
+      const members = (rel?.members || []);
+      const nodeIds = members
+        .filter(m => m.type === "node" && (!m.role || /platform|stop/i.test(m.role)))
+        .map(m => m.ref);
+      relMembersCache.set(relationId, nodeIds);
+      return nodeIds;
+    } catch {}
+  }
+  relMembersCache.set(relationId, []);
+  return [];
+}
+
+// Chunked relations by nodes
 async function fetchRouteRelationsByNodes(nodeIds) {
   if (!nodeIds.length) return [];
   const CHUNK = 40;
   const all = [];
   for (let i = 0; i < nodeIds.length; i += CHUNK) {
-    const part = nodeIds.slice(i, i + CHUNK);
-    const idList = part.join(",");
+    const idList = nodeIds.slice(i, i + CHUNK).join(",");
     const q = `
 [out:json][timeout:30];
 node(id:${idList});
@@ -350,24 +349,19 @@ rel(bn)->.r;
     let ok = false;
     for (const url of OVERPASS_URLS) {
       try {
-        const res = await fetch(url, {
-          method: "POST",
-          headers: {"Content-Type":"application/x-www-form-urlencoded"},
-          body: new URLSearchParams({ data: q })
-        });
+        const res = await fetch(url, { method:"POST", headers:{"Content-Type":"application/x-www-form-urlencoded"}, body:new URLSearchParams({ data:q }) });
         if (!res.ok) continue;
         const json = await res.json();
         all.push(...(json.elements || []).filter(e => e.type === "relation"));
-        ok = true;
-        break;
+        ok = true; break;
       } catch {}
     }
-    if (!ok) { /* skip this chunk softly */ }
+    if (!ok) { /* skip softly */ }
   }
   return all;
 }
 
-// Read route labels for one stop (short strings)
+// Route labels for UI
 async function getStopRouteLabels(nodeId) {
   const rels = await fetchStopRoutes(nodeId);
   const labels = rels.map(r => {
@@ -390,11 +384,7 @@ out body 20;
 `.trim();
   for (const url of OVERPASS_URLS) {
     try {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: {"Content-Type":"application/x-www-form-urlencoded"},
-        body: new URLSearchParams({ data: q })
-      });
+      const res = await fetch(url, { method:"POST", headers:{"Content-Type":"application/x-www-form-urlencoded"}, body:new URLSearchParams({ data:q }) });
       if (!res.ok) continue;
       const json = await res.json();
       return (json.elements || []).filter(e => e.type === "node");
@@ -403,99 +393,43 @@ out body 20;
   return [];
 }
 
-// NEW: find candidate "terminus" names within ~1 mile of Home
-async function fetchHomeTerminusCandidates(home, radiusMeters = 1609) {
-  const qStations = `
-[out:json][timeout:25];
-(
-  node(around:${radiusMeters},${home.lat},${home.lon})["amenity"="bus_station"];
-  node(around:${radiusMeters},${home.lat},${home.lon})["public_transport"="station"]["bus"="yes"];
-);
-out body 10;
-`.trim();
-
-  const tryFetch = async (q) => {
-    for (const url of OVERPASS_URLS) {
-      try {
-        const res = await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          body: new URLSearchParams({ data: q })
-        });
-        if (!res.ok) continue;
-        return await res.json();
-      } catch {}
-    }
-    return null;
-  };
-
-  let json = await tryFetch(qStations);
-  let stations = (json?.elements || []).filter(e => e.type === "node");
-
-  if (stations.length) {
-    const names = stations.map(s => (s.tags?.name || s.tags?.official_name || "")).filter(Boolean);
-    return [...new Set(names.map(n => n.toLowerCase()))];
-  }
-
-  // Fallback: choose most-connected nearby stops as proxy "termini"
-  const homeStops = await fetchHomeAreaStops(home, Math.min(radiusMeters, 1200));
-  if (!homeStops.length) return [];
-
-  const scored = [];
-  for (const node of homeStops.slice(0, 20)) {
-    try {
-      const rels = await fetchStopRoutes(node.id);
-      const name = node.tags?.name || "";
-      scored.push({ id: node.id, name, routes: rels.length });
-    } catch {}
-  }
-  scored.sort((a,b) => b.routes - a.routes);
-  const top = scored.slice(0, 3).map(s => s.name).filter(Boolean);
-  return [...new Set(top.map(n => n.toLowerCase()))];
-}
-
-// UPDATED: keep only stops whose routes mention a Home "terminus" within ~1 mile
+// ======= Direction-aware: Only stops heading toward Home =======
 async function getStopsTowardHomeSet(stopsNearYou, home) {
-  let terminusNames = [];
-  try {
-    terminusNames = await fetchHomeTerminusCandidates(home, 1609);
-  } catch { terminusNames = []; }
-
-  if (!terminusNames.length) {
-    return await nameHeuristicHomeSet(stopsNearYou, home);
-  }
-
-  const tokens = [...new Set(
-    terminusNames.flatMap(n => n.split(/[\s,]+/)).filter(w => w.length >= 3)
-  )];
+  // 1) Home area stops within ~1 mile
+  const homeStops = await fetchHomeAreaStops(home, 1609);
+  if (!homeStops.length) return await nameHeuristicHomeSet(stopsNearYou, home);
+  const homeIds = new Set(homeStops.map(s => s.id));
 
   const hitIds = new Set();
   for (const s of stopsNearYou) {
     try {
-      const rels = await fetchStopRoutes(s.id);
-      const hit = rels.some(r => {
-        const t = r.tags || {};
-        const hay = [
-          t.destination, t.to, t.via, t.name, t["name:en"], t.ref
-        ].filter(Boolean).join(" • ").toLowerCase();
-        return tokens.some(tok => hay.includes(tok));
-      });
-      if (hit) hitIds.add(s.id);
+      let rels = await fetchStopRoutes(s.id);
+      rels = rels.filter(r => /bus|tram|train|subway|light_rail/.test(r.tags?.route || "")).slice(0, 8);
+
+      let towardsHome = false;
+      for (const r of rels) {
+        const orderedNodes = await fetchRelationMembersOrdered(r.id);
+        if (!orderedNodes.length) continue;
+
+        const idxS = orderedNodes.indexOf(s.id);
+        if (idxS === -1) continue; // some relations may not include the exact stop node
+
+        for (let i = idxS + 1; i < orderedNodes.length; i++) {
+          if (homeIds.has(orderedNodes[i])) { towardsHome = true; break; }
+        }
+        if (towardsHome) break;
+      }
+      if (towardsHome) hitIds.add(s.id);
     } catch {}
   }
-
-  if (!hitIds.size) {
-    return await nameHeuristicHomeSet(stopsNearYou, home);
-  }
+  if (!hitIds.size) return await nameHeuristicHomeSet(stopsNearYou, home);
   return hitIds;
 }
 
-// Fallback name-based heuristic (best effort)
+// Fallback name heuristic
 async function nameHeuristicHomeSet(stops, home) {
   const tokens = (home.label || home.postcode || "")
-    .toLowerCase()
-    .split(/[\s,]+/)
-    .filter(x => x.length > 2);
+    .toLowerCase().split(/[\s,]+/).filter(x => x.length > 2);
   const out = new Set();
   for (const s of stops) {
     try {
@@ -511,9 +445,9 @@ async function nameHeuristicHomeSet(stops, home) {
   return out;
 }
 
-// ======= Stops (filter to Home terminus, routes, live times) =======
+// ======= Stops (filter, routes, live times) =======
 async function loadStops(lat,lng,radius=800){
-  elStopsRadius.textContent = radius;
+  elStopsRadius && (elStopsRadius.textContent = radius);
   const q = `
 [out:json][timeout:25];
 (
@@ -562,7 +496,7 @@ out skel qt;
   if (!stops.length) {
     setHTML(elStopsList, `
       <div class="muted" style="padding:8px;">
-        No nearby stops found that clearly go to a Home terminus (~1 mile).
+        No nearby stops found that are clearly heading toward Home.
         Try turning off “Only stops to Home” or zooming out.
       </div>
     `);
@@ -589,7 +523,7 @@ out skel qt;
         <div>
           <div class="stop-name">
             ${escapeHtml(s.name)}
-            ${homeSet && homeSet.has(s.id) ? `<span class="pill" style="margin-left:6px;">→ Home terminus</span>` : ""}
+            ${homeSet && homeSet.has(s.id) ? `<span class="pill" style="margin-left:6px;">→ Home</span>` : ""}
           </div>
           <div class="muted" style="font-size:12px;">
             ${s.kind === "bus" ? "Bus stop" : "Train/Tram"} • ${miles(s.dist)} mi
@@ -609,7 +543,7 @@ out skel qt;
   // Per-stop tiny weather
   await fillStopsWeather(stops);
 
-  // Per-stop OSM route labels + live times
+  // OSM route labels + live times
   for (const s of stops) {
     getStopRouteLabels(s.id).then(labels => {
       const el = document.getElementById(`routes-${s.id}`);
@@ -628,7 +562,7 @@ out skel qt;
     }
   }
 
-  // Wire route buttons
+  // Route buttons
   [...elStopsList.querySelectorAll("button[data-route]")].forEach(btn => {
     btn.onclick = async () => {
       hide(elErrors);
@@ -648,7 +582,6 @@ out skel qt;
 async function fillStopsWeather(stops) {
   const MAX_FETCH = 8;
   let remaining = MAX_FETCH;
-
   for (const s of stops) {
     const key = roundKey(s.pos[0], s.pos[1]);
     let wx = wxNowCache.get(key);
@@ -658,15 +591,13 @@ async function fillStopsWeather(stops) {
         wx = { temp: Math.round(w?.main?.temp ?? 0), icon: w?.weather?.[0]?.icon };
         wxNowCache.set(key, wx);
         remaining--;
-      } catch { /* ignore */ }
+      } catch {}
     }
     const el = document.getElementById(`wx-${s.id}`);
     if (!el) continue;
-    if (wx && wx.icon != null) {
-      el.innerHTML = `<img src="${iconUrl(wx.icon)}" alt="" /><strong>${wx.temp}°C</strong>`;
-    } else {
-      el.innerHTML = `<span class="pill">n/a</span>`;
-    }
+    el.innerHTML = (wx && wx.icon != null)
+      ? `<img src="${iconUrl(wx.icon)}" alt="" /><strong>${wx.temp}°C</strong>`
+      : `<span class="pill">n/a</span>`;
   }
 }
 
@@ -727,19 +658,14 @@ elBtnClearRoute && (elBtnClearRoute.onclick = () => { clearRoute(); hide(elDirec
 function clearRoute(){ if(routeLine) routeLine.remove(); routeLine=null; setHTML(elDirSteps,""); }
 
 async function routeBetween(from,to){
-  try {
-    const r = await routeOSRM(from, to);
-    drawRoute(r);
-  } catch (e1) {
+  try { drawRoute(await routeOSRM(from, to)); }
+  catch (e1) {
     if (ORS_KEY) {
-      try { const r = await routeORS(from, to, ORS_KEY); drawRoute(r); }
-      catch (e2) { showError("Routing failed (OSRM & ORS)."); }
-    } else {
-      showError("Routing failed (OSRM). You can add an ORS key for fallback.");
-    }
+      try { drawRoute(await routeORS(from, to, ORS_KEY)); }
+      catch { showError("Routing failed (OSRM & ORS)."); }
+    } else showError("Routing failed (OSRM). You can add an ORS key for fallback.");
   }
 }
-
 async function routeOSRM(from,to){
   const url=`https://router.project-osrm.org/route/v1/foot/${from[1]},${from[0]};${to[1]},${to[0]}?overview=full&geometries=geojson&steps=true`;
   const data=await getJSON(url);
@@ -761,7 +687,7 @@ function osrmStepToText(step){
     case "turn": return `Turn${mod}${road}${dist}`;
     case "new name": return `Continue${road}${dist}`;
     case "merge": return `Merge${road}${dist}`;
-    case "end of road": return `End of road, turn${mod}${road}${dist}`;
+    case "end of road": return `End of road, turn${mod}${dist}`;
     default: return `Continue${road}${dist}`;
   }
 }
@@ -827,8 +753,7 @@ async function doSearch(q){
       };
     });
   }catch{ hide(elResults); }
-}
-// close results when clicking outside
+});
 document.addEventListener("click",(e)=>{ if(elResults && !elResults.contains(e.target) && e.target!==elSearch) hide(elResults); });
 
 // ======= Home autocomplete =======
