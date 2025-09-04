@@ -17,11 +17,12 @@ window.CONFIG = {
   },
 
   // TfL Unified API (optional; improves London stops + live arrivals)
-  TFL: {
-    ENABLED: true,
-    APP_ID: "",   // optional
-    APP_KEY: "015957588b78493ea496bf478049a0fb"   // optional
-  },
+// Unified API (StopPoint/Line/Arrivals etc.)
+    APP_ID: "",                                  // optional
+    APP_KEY: "015957588b78493ea496bf478049a0fb", // ← your Primary key works for many endpoints too
+
+    // Azure APIM subscription (Trackernet / APIM products)
+    SUBSCRIPTION_KEY: "77b770920d254535ba4c50e9f1a7c2b3b8" // example: your "trackerfreshspot" primary
 
   // BODS / SIRI-VM (optional; browser access often blocked by CORS — leave off unless you proxy)
   BODS: {
