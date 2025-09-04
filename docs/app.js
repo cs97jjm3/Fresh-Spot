@@ -24,13 +24,17 @@ const elBtnRoute = document.getElementById("btn-route");
 const elBtnClearRoute = document.getElementById("btn-clear-route");
 const elRouteSummary = document.getElementById("route-summary");
 
-// Optional "Route from" radios (myloc/selected)
+// Route-from toggle (optional radios in your HTML)
 const elRFMy = document.getElementById("rf-myloc");
 const elRFSel = document.getElementById("rf-selected");
 
-// Optional Home header elements (add these in HTML if you want a visible pill in header)
-const elHomePill = document.getElementById("home-pill");       // <span id="home-pill"></span>
-const elHomeClear = document.getElementById("home-clear");     // <button id="home-clear">Clear</button>
+// Home bar elements (added in header)
+const elHomeSetup   = document.getElementById("home-setup");
+const elHomeInput   = document.getElementById("home-input");
+const elHomeSave    = document.getElementById("home-save");
+const elHomeView    = document.getElementById("home-view");
+const elHomeDisplay = document.getElementById("home-display");
+const elHomeEdit    = document.getElementById("home-edit");
 
 // ======= Map setup =======
 const map = L.map("map");
@@ -52,105 +56,87 @@ let stopLayers = [];         // circle markers for stops
 const wxNowCache = new Map();     // key: "lat,lon" rounded -> { temp, icon, desc, name, country }
 const hourlyCache = new Map();    // key: "lat,lon" rounded -> [hourly items]
 
-// ======= Home storage =======
+// ======= Storage: Home (one-time entry) =======
 const HOME_KEY = "freshstop_home";
 function getHome() {
   try { return JSON.parse(localStorage.getItem(HOME_KEY) || "null"); } catch { return null; }
 }
 function setHome(obj) {
   localStorage.setItem(HOME_KEY, JSON.stringify(obj));
-  renderHomePill();
+  renderHomeUI();
 }
-function clearHome() {
-  localStorage.removeItem(HOME_KEY);
-  renderHomePill();
-}
-function renderHomePill() {
+function renderHomeUI() {
   const home = getHome();
-  if (!elHomePill) return; // header pill is optional
   if (home) {
-    elHomePill.innerHTML = `<span class="pill">Home: ${escapeHtml(home.label || (home.postcode || `${home.lat.toFixed(3)}, ${home.lon.toFixed(3)}`))}</span>`;
-    elHomePill.style.display = "";
-    if (elHomeClear) elHomeClear.style.display = "";
+    if (elHomeSetup) elHomeSetup.style.display = "none";
+    if (elHomeView)  elHomeView.style.display  = "";
+    if (elHomeDisplay) elHomeDisplay.textContent = `Home: ${home.label || home.postcode || `${home.lat.toFixed(3)}, ${home.lon.toFixed(3)}`}`;
   } else {
-    elHomePill.innerHTML = "";
-    elHomePill.style.display = "none";
-    if (elHomeClear) elHomeClear.style.display = "none";
+    if (elHomeSetup) elHomeSetup.style.display = "";
+    if (elHomeView)  elHomeView.style.display  = "none";
+    if (elHomeInput) elHomeInput.value = "";
   }
 }
-elHomeClear && (elHomeClear.onclick = () => { clearHome(); });
-
-// On load, show Home if already set
-renderHomePill();
-
-// click to select point
-map.on("click", (e) => {
-  setSelected([e.latlng.lat, e.latlng.lng], "(map click)");
+async function forwardGeocode(q) {
+  const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=1&q=${encodeURIComponent(q)}`;
+  const data = await getJSON(url, { "Accept-Language": "en" });
+  const item = Array.isArray(data) ? data[0] : null;
+  if (!item) throw new Error("Couldn’t find that address/postcode.");
+  const a = item.address || {};
+  const parts = [
+    [a.road, a.pedestrian, a.footway, a.cycleway, a.path].find(Boolean),
+    a.suburb || a.neighbourhood || a.village || a.hamlet,
+    a.town || a.city || a.county,
+    a.postcode
+  ].filter(Boolean);
+  return {
+    lat: parseFloat(item.lat),
+    lon: parseFloat(item.lon),
+    postcode: a.postcode || "",
+    label: parts.filter(Boolean).join(", ") || item.display_name
+  };
+}
+// wire Home save/edit
+elHomeSave && (elHomeSave.onclick = async () => {
+  const q = (elHomeInput?.value || "").trim();
+  if (!q) { alert("Please enter your home address or postcode."); return; }
+  try {
+    const home = await forwardGeocode(q);
+    setHome(home);
+  } catch (e) {
+    alert(e.message || "Couldn’t set Home.");
+  }
 });
-
-// try geolocation once
-if ("geolocation" in navigator) {
-  navigator.geolocation.getCurrentPosition(
-    (pos) => {
-      myLocation = [pos.coords.latitude, pos.coords.longitude];
-      map.setView(myLocation, 14);
-      L.circle(myLocation, { radius: 6, color: "#0ea5e9", fillColor: "#0ea5e9", fillOpacity: 0.7 }).addTo(map);
-    },
-    () => {}
-  );
-}
-
-// ======= UI helpers =======
-function show(el) { if (el) el.style.display = ""; }
-function hide(el) { if (el) el.style.display = "none"; }
-function setHTML(el, html) { if (el) el.innerHTML = html; }
-function km(meters) { return (meters / 1000).toFixed(2); }
-function minutes(seconds) { return Math.round(seconds / 60); }
-function roundKey(lat, lon) { return `${lat.toFixed(2)},${lon.toFixed(2)}`; } // ~1-2km tile
-function escapeHtml(s="") {
-  return s.replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;");
-}
-function iconUrl(code) { return `https://openweathermap.org/img/wn/${code}@2x.png`; }
-function hourStr(ts, tzOffsetSec = 0) {
-  const d = new Date((ts + tzOffsetSec) * 1000);
-  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-}
-function haversine(a, b) {
-  const toRad = d => d * Math.PI / 180;
-  const R = 6371000;
-  const dLat = toRad(b[0] - a[0]);
-  const dLon = toRad(b[1] - a[1]);
-  const lat1 = toRad(a[0]);
-  const lat2 = toRad(b[0]);
-  const h = Math.sin(dLat/2)**2 + Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLon/2)**2;
-  return 2*R*Math.asin(Math.sqrt(h));
-}
+elHomeEdit && (elHomeEdit.onclick = () => {
+  // let user re-enter; keep previous value as placeholder
+  const cur = getHome();
+  if (elHomeInput) elHomeInput.placeholder = cur?.label || cur?.postcode || elHomeInput.placeholder;
+  localStorage.removeItem(HOME_KEY);
+  renderHomeUI();
+});
+// initialize Home UI on load
+renderHomeUI();
 
 // ======= Route-from toggle helpers =======
 function getRouteFromMode() {
-  // default to "myloc" if the radios aren't present
+  // default to "myloc" if radios not present
   if (!elRFMy || !elRFSel) return "myloc";
   return elRFSel.checked ? "selected" : "myloc";
 }
-
 async function getOrigin() {
   const mode = getRouteFromMode();
-
   if (mode === "selected") {
     if (!selectedPoint) throw new Error("Pick a point on the map first.");
     return selectedPoint;
   }
-
-  // mode === "myloc"
   if (myLocation) return myLocation;
-
   const pos = await getCurrentPosition();
   myLocation = [pos.coords.latitude, pos.coords.longitude];
   L.circle(myLocation, { radius: 6, color: "#0ea5e9", fillColor: "#0ea5e9", fillOpacity: 0.7 }).addTo(map);
   return myLocation;
 }
 
-// ======= Reverse geocode (Nominatim) =======
+// ======= Reverse geocode (for nice “Selected location”) =======
 async function reverseGeocode(lat, lon) {
   const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}&addressdetails=1`;
   const data = await getJSON(url, { "Accept-Language": "en" });
@@ -169,11 +155,49 @@ async function reverseGeocode(lat, lon) {
   };
 }
 
+// ======= Map interactions =======
+map.on("click", (e) => {
+  setSelected([e.latlng.lat, e.latlng.lng], "(map click)");
+});
+if ("geolocation" in navigator) {
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      myLocation = [pos.coords.latitude, pos.coords.longitude];
+      map.setView(myLocation, 14);
+      L.circle(myLocation, { radius: 6, color: "#0ea5e9", fillColor: "#0ea5e9", fillOpacity: 0.7 }).addTo(map);
+    },
+    () => {}
+  );
+}
+
+// ======= Small helpers =======
+function show(el) { if (el) el.style.display = ""; }
+function hide(el) { if (el) el.style.display = "none"; }
+function setHTML(el, html) { if (el) el.innerHTML = html; }
+function km(meters) { return (meters / 1000).toFixed(2); }
+function minutes(seconds) { return Math.round(seconds / 60); }
+function roundKey(lat, lon) { return `${lat.toFixed(2)},${lon.toFixed(2)}`; } // ~1-2km tile
+function escapeHtml(s="") { return s.replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;"); }
+function iconUrl(code) { return `https://openweathermap.org/img/wn/${code}@2x.png`; }
+function hourStr(ts, tzOffsetSec = 0) {
+  const d = new Date((ts + tzOffsetSec) * 1000);
+  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+function haversine(a, b) {
+  const toRad = d => d * Math.PI / 180;
+  const R = 6371000;
+  const dLat = toRad(b[0] - a[0]);
+  const dLon = toRad(b[1] - a[1]);
+  const lat1 = toRad(a[0]);
+  const lat2 = toRad(b[0]);
+  const h = Math.sin(dLat/2)**2 + Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLon/2)**2;
+  return 2*R*Math.asin(Math.sqrt(h));
+}
+
 // ======= Selection workflow =======
 async function setSelected([lat, lng], source = "") {
   selectedPoint = [lat, lng];
 
-  // marker
   if (selectedMarker) selectedMarker.remove();
   selectedMarker = L.circleMarker(selectedPoint, {
     radius: 7, color: "#ef4444", fillColor: "#ef4444", fillOpacity: 0.8
@@ -189,7 +213,7 @@ async function setSelected([lat, lng], source = "") {
   clearStops();
   clearRoute();
 
-  // selection card (friendly address, keeps coords, add "Set as Home")
+  // selection card (friendly address + coords)
   const latTxt = lat.toFixed(5);
   const lngTxt = lng.toFixed(5);
 
@@ -199,18 +223,14 @@ async function setSelected([lat, lng], source = "") {
         <div style="font-weight:700; margin-bottom:4px;">Selected location</div>
         <div class="muted">Looking up address…</div>
       </div>
-      <div style="display:flex; gap:8px; align-items:center;">
-        <button class="btn" id="btn-copy">Copy coords</button>
-        <button class="btn" id="btn-set-home">Set as Home</button>
-      </div>
+      <button class="btn" id="btn-copy">Copy coords</button>
     </div>
   `);
   show(elSelection);
   document.getElementById("btn-copy").onclick = () => navigator.clipboard?.writeText(`${latTxt}, ${lngTxt}`);
 
-  let rev = null;
   try {
-    rev = await reverseGeocode(lat, lng);
+    const rev = await reverseGeocode(lat, lng);
     const pretty = rev.line || rev.display || `${latTxt}, ${lngTxt}`;
     setHTML(elSelection, `
       <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
@@ -221,22 +241,11 @@ async function setSelected([lat, lng], source = "") {
         </div>
         <div style="display:flex; gap:8px; align-items:center;">
           <button class="btn" id="btn-copy">Copy coords</button>
-          ${rev.postcode ? `<span class="pill" title="Postcode">${escapeHtml(rev.postcode)}</span>` : ""}
-          <button class="btn" id="btn-set-home">Set as Home</button>
         </div>
       </div>
     `);
     document.getElementById("btn-copy").onclick = () => navigator.clipboard?.writeText(`${latTxt}, ${lngTxt}`);
-  } catch {
-    // keep default coords-only view if reverse fails
-  }
-
-  // Set as Home handler
-  document.getElementById("btn-set-home").onclick = () => {
-    const label = rev?.label || `${latTxt}, ${lngTxt}`;
-    const home = { lat, lon: lng, label, postcode: rev?.postcode || "" };
-    setHome(home);
-  };
+  } catch { /* keep default */ }
 
   // load weather + air + stops (in parallel)
   try {
@@ -255,7 +264,6 @@ async function setSelected([lat, lng], source = "") {
 async function loadWeatherAndForecast(lat, lng) {
   if (!OWM_KEY) throw new Error("Missing OpenWeatherMap key.");
 
-  // Current weather
   const wx = await getJSON(`https://api.openweathermap.org/data/2.5/weather?lat=${lat}&lon=${lng}&units=metric&appid=${OWM_KEY}`);
   const t = Math.round(wx?.main?.temp ?? 0);
   const feels = Math.round(wx?.main?.feels_like ?? 0);
@@ -264,31 +272,19 @@ async function loadWeatherAndForecast(lat, lng) {
   const place = [wx?.name, wx?.sys?.country].filter(Boolean).join(", ");
   const icon = wx?.weather?.[0]?.icon;
 
-  // Cache “now” for nearby stops reuse
-  wxNowCache.set(roundKey(lat, lng), {
-    temp: t, icon, desc, name: wx?.name, country: wx?.sys?.country
-  });
+  wxNowCache.set(roundKey(lat, lng), { temp: t, icon, desc, name: wx?.name, country: wx?.sys?.country });
 
-  // Try OneCall hourly; fallback to /forecast 3-hourly
   let hours = [];
   try {
     const one = await getJSON(`https://api.openweathermap.org/data/3.0/onecall?lat=${lat}&lon=${lng}&exclude=minutely,daily,alerts&units=metric&appid=${OWM_KEY}`);
     const tz = one?.timezone_offset || 0;
-    hours = (one?.hourly || []).slice(0, 3).map(h => ({
-      ts: h.dt, t: Math.round(h.temp), icon: h.weather?.[0]?.icon, tz
-    }));
+    hours = (one?.hourly || []).slice(0, 3).map(h => ({ ts: h.dt, t: Math.round(h.temp), icon: h.weather?.[0]?.icon, tz }));
   } catch {
     const fc = await getJSON(`https://api.openweathermap.org/data/2.5/forecast?lat=${lat}&lon=${lng}&units=metric&cnt=2&appid=${OWM_KEY}`);
-    hours = (fc?.list || []).map(h => ({
-      ts: Math.floor(new Date(h.dt_txt).getTime()/1000),
-      t: Math.round(h.main?.temp),
-      icon: h.weather?.[0]?.icon,
-      tz: 0
-    }));
+    hours = (fc?.list || []).map(h => ({ ts: Math.floor(new Date(h.dt_txt).getTime()/1000), t: Math.round(h.main?.temp), icon: h.weather?.[0]?.icon, tz: 0 }));
   }
   hourlyCache.set(roundKey(lat, lng), hours);
 
-  // Render WOW weather
   setHTML(elWeather, `
     <div class="wx-top">
       <div class="wx-main">
@@ -336,8 +332,7 @@ async function loadAir(lat, lng) {
   const comp = air?.list?.[0]?.components || {};
   const [label, cls] = aqiClass(main.aqi || 0);
 
-  // Indicative scales for bar rendering (μg/m³)
-  const scales = { pm2_5: 75, pm10: 150, no2: 200, o3: 180 };
+  const scales = { pm2_5: 75, pm10: 150, no2: 200, o3: 180 }; // indicative caps for bar visuals
 
   setHTML(elAir, `
     <div style="display:flex; align-items:center; justify-content:space-between;">
@@ -365,7 +360,7 @@ async function loadAir(lat, lng) {
   show(elAir);
 }
 
-// ======= Stops (Overpass) + Weather per stop + "→ Home" hint =======
+// ======= Stops (Overpass) + weather per stop + “→ Home” hint =======
 async function loadStops(lat, lng, radiusMeters = 800) {
   elStopsRadius.textContent = radiusMeters;
   const query = `
@@ -394,7 +389,7 @@ out skel qt;
       return { id: el.id, kind, name, pos, dist, tags };
     })
     .sort((a, b) => a.dist - b.dist)
-    .slice(0, 12); // cap list for clarity + fewer API calls
+    .slice(0, 12); // cap list
 
   // Draw markers
   clearStops();
@@ -427,13 +422,13 @@ out skel qt;
   `).join(""));
   show(elStops);
 
-  // Fill weather for each stop (cached + limited)
+  // Fill per-stop weather
   await fillStopsWeather(stops);
 
-  // If Home set, annotate which stops likely head to Home (via route relation names)
+  // If Home set, annotate which stops likely head to Home
   const home = getHome();
   if (home) {
-    try { await annotateStopsTowardHome(stops, home); } catch { /* ignore if Overpass busy */ }
+    try { await annotateStopsTowardHome(stops, home); } catch { /* Overpass may be busy */ }
   }
 
   // Wire route buttons – use origin based on toggle
@@ -454,7 +449,6 @@ out skel qt;
 }
 
 async function fillStopsWeather(stops) {
-  // Limit requests: only first 8 will fetch; the rest reuse nearest cached tile
   const MAX_FETCH = 8;
   let remaining = MAX_FETCH;
 
@@ -472,9 +466,7 @@ async function fillStopsWeather(stops) {
         };
         wxNowCache.set(key, wx);
         remaining--;
-      } catch {
-        // ignore
-      }
+      } catch { /* ignore */ }
     }
     const el = document.getElementById(`wx-${s.id}`);
     if (!el) continue;
@@ -486,8 +478,7 @@ async function fillStopsWeather(stops) {
   }
 }
 
-// Heuristic: for top N stops, fetch route relations serving that stop,
-// then mark a "→ Home" badge if route tags ('to','name','destination','via') mention home label/postcode.
+// Heuristic: check route relations serving each stop for names like "... to <Home>" etc.
 async function annotateStopsTowardHome(stops, home) {
   const MAX_STOPS_CHECK = 8;
   const targets = stops.slice(0, MAX_STOPS_CHECK);
@@ -507,30 +498,23 @@ async function annotateStopsTowardHome(stops, home) {
         const badge = document.getElementById(`homehint-${s.id}`);
         if (badge) badge.style.display = "";
       }
-    } catch {
-      // Overpass busy — skip
-    }
+    } catch { /* ignore */ }
   }
 
-  // Helper: build tokens from label (split by commas/spaces) and postcode
   function homeTokens(h) {
     const arr = [];
     const label = (h.label || "").toLowerCase();
     const postcode = (h.postcode || "").toLowerCase();
-    // Add full label and postcode
     if (label) arr.push(label);
     if (postcode) arr.push(postcode);
-    // Add last token from label (often town/city)
     const parts = label.split(/,\s*/).map(x => x.trim()).filter(Boolean);
     if (parts.length) {
       const last = parts[parts.length - 1];
       if (last && last.length > 2) arr.push(last.toLowerCase());
     }
-    // Deduplicate short words
     return [...new Set(arr.filter(x => x.length >= 3))];
   }
 
-  // Overpass: relations that reference this node (bn = by node)
   async function fetchStopRoutes(nodeId) {
     const q = `
 [out:json][timeout:25];
@@ -735,18 +719,16 @@ document.addEventListener("click", (e) => {
   if (!elResults.contains(e.target) && e.target !== elSearch) hide(elResults);
 });
 
-// ======= Small helpers =======
+// ======= Generic helpers =======
 async function getJSON(url, extraHeaders = {}) {
   const res = await fetch(url, { headers: { ...extraHeaders } });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return await res.json();
 }
-
 function getCurrentPosition() {
   return new Promise((resolve, reject) => {
     if (!navigator.geolocation) return reject(new Error("Geolocation unsupported"));
     navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: true, timeout: 10000 });
   });
 }
-
 function showError(msg) { setHTML(elErrors, `⚠️ ${msg}`); show(elErrors); }
