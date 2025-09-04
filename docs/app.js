@@ -21,6 +21,7 @@ const elDirSteps = document.getElementById("directions-steps");
 const elErrors = document.getElementById("errors");
 const elBtnMyLoc = document.getElementById("btn-my-location");
 const elBtnRoute = document.getElementById("btn-route");
+const elBtnRouteHome = document.getElementById("btn-route-home");
 const elBtnClearRoute = document.getElementById("btn-clear-route");
 const elRouteSummary = document.getElementById("route-summary");
 
@@ -28,16 +29,11 @@ const elRouteSummary = document.getElementById("route-summary");
 const elRFMy = document.getElementById("rf-myloc");
 const elRFSel = document.getElementById("rf-selected");
 
-// Home bar elements (added in header)
-const elHomeSetup   = document.getElementById("home-setup");
+// Home (search-like) in header
 const elHomeInput   = document.getElementById("home-input");
-const elHomeSave    = document.getElementById("home-save");
-const elHomeView    = document.getElementById("home-view");
-const elHomeDisplay = document.getElementById("home-display");
-const elHomeEdit    = document.getElementById("home-edit");
-const elHomePill    = document.getElementById("home-pill");
 const elHomeResults = document.getElementById("home-results");
-
+const elHomePill    = document.getElementById("home-pill");
+const elHomeEdit    = document.getElementById("home-edit");
 
 // ======= Map setup =======
 const map = L.map("map");
@@ -59,7 +55,7 @@ let stopLayers = [];         // circle markers for stops
 const wxNowCache = new Map();     // key: "lat,lon" rounded -> { temp, icon, desc, name, country }
 const hourlyCache = new Map();    // key: "lat,lon" rounded -> [hourly items]
 
-// ======= Storage: Home (one-time entry) =======
+// ======= Storage: Home (saved once) =======
 const HOME_KEY = "freshstop_home";
 function getHome() {
   try { return JSON.parse(localStorage.getItem(HOME_KEY) || "null"); } catch { return null; }
@@ -68,100 +64,34 @@ function setHome(obj) {
   localStorage.setItem(HOME_KEY, JSON.stringify(obj));
   renderHomeUI();
 }
-function renderHomeUI() {
-  const home = getHome();
-  if (home) {
-    if (elHomeSetup) elHomeSetup.style.display = "none";
-    if (elHomeView)  elHomeView.style.display  = "";
-    if (elHomeDisplay) elHomeDisplay.textContent = `Home: ${home.label || home.postcode || `${home.lat.toFixed(3)}, ${home.lon.toFixed(3)}`}`;
-  } else {
-    if (elHomeSetup) elHomeSetup.style.display = "";
-    if (elHomeView)  elHomeView.style.display  = "none";
-    if (elHomeInput) elHomeInput.value = "";
-  }
-}
-async function forwardGeocode(q) {
-  const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=1&q=${encodeURIComponent(q)}`;
-  const data = await getJSON(url, { "Accept-Language": "en" });
-  const item = Array.isArray(data) ? data[0] : null;
-  if (!item) throw new Error("Couldn’t find that address/postcode.");
-  const a = item.address || {};
-  const parts = [
-    [a.road, a.pedestrian, a.footway, a.cycleway, a.path].find(Boolean),
-    a.suburb || a.neighbourhood || a.village || a.hamlet,
-    a.town || a.city || a.county,
-    a.postcode
-  ].filter(Boolean);
-  return {
-    lat: parseFloat(item.lat),
-    lon: parseFloat(item.lon),
-    postcode: a.postcode || "",
-    label: parts.filter(Boolean).join(", ") || item.display_name
-  };
-}
-// wire Home save/edit
-elHomeSave && (elHomeSave.onclick = async () => {
-  const q = (elHomeInput?.value || "").trim();
-  if (!q) { alert("Please enter your home address or postcode."); return; }
-  try {
-    const home = await forwardGeocode(q);
-    setHome(home);
-  } catch (e) {
-    alert(e.message || "Couldn’t set Home.");
-  }
-});
-elHomeEdit && (elHomeEdit.onclick = () => {
-  // let user re-enter; keep previous value as placeholder
-  const cur = getHome();
-  if (elHomeInput) elHomeInput.placeholder = cur?.label || cur?.postcode || elHomeInput.placeholder;
+function clearHome() {
   localStorage.removeItem(HOME_KEY);
   renderHomeUI();
-});
-// initialize Home UI on load
-renderHomeUI();
-
-// ======= Route-from toggle helpers =======
-function getRouteFromMode() {
-  // default to "myloc" if radios not present
-  if (!elRFMy || !elRFSel) return "myloc";
-  return elRFSel.checked ? "selected" : "myloc";
 }
-async function getOrigin() {
-  const mode = getRouteFromMode();
-  if (mode === "selected") {
-    if (!selectedPoint) throw new Error("Pick a point on the map first.");
-    return selectedPoint;
+function renderHomeUI() {
+  const home = getHome();
+  if (!elHomeInput || !elHomePill || !elHomeEdit) return;
+  if (home) {
+    elHomeInput.style.display = "none";
+    elHomePill.style.display = "";
+    elHomeEdit.style.display = "";
+    elHomePill.textContent = `Home: ${home.label || home.postcode || `${home.lat.toFixed(3)}, ${home.lon.toFixed(3)}`}`;
+    if (elHomeResults) { elHomeResults.style.display = "none"; elHomeResults.innerHTML = ""; }
+  } else {
+    elHomeInput.style.display = "";
+    elHomePill.style.display = "none";
+    elHomeEdit.style.display = "none";
   }
-  if (myLocation) return myLocation;
-  const pos = await getCurrentPosition();
-  myLocation = [pos.coords.latitude, pos.coords.longitude];
-  L.circle(myLocation, { radius: 6, color: "#0ea5e9", fillColor: "#0ea5e9", fillOpacity: 0.7 }).addTo(map);
-  return myLocation;
 }
-
-// ======= Reverse geocode (for nice “Selected location”) =======
-async function reverseGeocode(lat, lon) {
-  const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}&addressdetails=1`;
-  const data = await getJSON(url, { "Accept-Language": "en" });
-  const a = data?.address || {};
-  const parts = [
-    [a.road, a.pedestrian, a.footway, a.cycleway, a.path].find(Boolean),
-    a.suburb || a.neighbourhood || a.village || a.hamlet,
-    a.town || a.city || a.county,
-    a.postcode
-  ].filter(Boolean);
-  return {
-    line: parts.join(", "),
-    display: data?.display_name || "",
-    postcode: a.postcode || "",
-    label: parts.filter(Boolean).join(", ") || data?.display_name || ""
-  };
-}
+renderHomeUI();
+elHomeEdit && (elHomeEdit.onclick = () => { clearHome(); elHomeInput.value = ""; elHomeInput.focus(); });
 
 // ======= Map interactions =======
 map.on("click", (e) => {
   setSelected([e.latlng.lat, e.latlng.lng], "(map click)");
 });
+
+// try geolocation once
 if ("geolocation" in navigator) {
   navigator.geolocation.getCurrentPosition(
     (pos) => {
@@ -173,7 +103,7 @@ if ("geolocation" in navigator) {
   );
 }
 
-// ======= Small helpers =======
+// ======= UI helpers =======
 function show(el) { if (el) el.style.display = ""; }
 function hide(el) { if (el) el.style.display = "none"; }
 function setHTML(el, html) { if (el) el.innerHTML = html; }
@@ -197,6 +127,51 @@ function haversine(a, b) {
   return 2*R*Math.asin(Math.sqrt(h));
 }
 
+// ======= Route-from toggle helpers =======
+function getRouteFromMode() {
+  if (!elRFMy || !elRFSel) return "myloc";
+  return elRFSel.checked ? "selected" : "myloc";
+}
+async function getOrigin() {
+  const mode = getRouteFromMode();
+  if (mode === "selected") {
+    if (!selectedPoint) throw new Error("Pick a point on the map first.");
+    return selectedPoint;
+  }
+  if (myLocation) return myLocation;
+  const pos = await getCurrentPosition();
+  myLocation = [pos.coords.latitude, pos.coords.longitude];
+  L.circle(myLocation, { radius: 6, color: "#0ea5e9", fillColor: "#0ea5e9", fillOpacity: 0.7 }).addTo(map);
+  return myLocation;
+}
+
+// ======= Reverse/Forward geocode =======
+async function reverseGeocode(lat, lon) {
+  const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}&addressdetails=1`;
+  const data = await getJSON(url, { "Accept-Language": "en" });
+  const a = data?.address || {};
+  const parts = [
+    [a.road, a.pedestrian, a.footway, a.cycleway, a.path].find(Boolean),
+    a.suburb || a.neighbourhood || a.village || a.hamlet,
+    a.town || a.city || a.county,
+    a.postcode
+  ].filter(Boolean);
+  return {
+    line: parts.join(", "),
+  };
+}
+
+function labelFromAddress(addrObj, displayName) {
+  const a = addrObj || {};
+  const parts = [
+    [a.road, a.pedestrian, a.footway, a.cycleway, a.path].find(Boolean),
+    a.suburb || a.neighbourhood || a.village || a.hamlet,
+    a.town || a.city || a.county,
+    a.postcode
+  ].filter(Boolean);
+  return parts.join(", ") || displayName || "";
+}
+
 // ======= Selection workflow =======
 async function setSelected([lat, lng], source = "") {
   selectedPoint = [lat, lng];
@@ -216,7 +191,7 @@ async function setSelected([lat, lng], source = "") {
   clearStops();
   clearRoute();
 
-  // selection card (friendly address + coords)
+  // selection card (nice line + coords)
   const latTxt = lat.toFixed(5);
   const lngTxt = lng.toFixed(5);
 
@@ -234,7 +209,7 @@ async function setSelected([lat, lng], source = "") {
 
   try {
     const rev = await reverseGeocode(lat, lng);
-    const pretty = rev.line || rev.display || `${latTxt}, ${lngTxt}`;
+    const pretty = rev.line || `${latTxt}, ${lngTxt}`;
     setHTML(elSelection, `
       <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
         <div>
@@ -569,6 +544,19 @@ elBtnRoute.onclick = async () => {
   }
 };
 
+elBtnRouteHome && (elBtnRouteHome.onclick = async () => {
+  const home = getHome();
+  if (!home) { showError("Set Home first (top bar)."); return; }
+  hide(elErrors);
+  hide(elRouteSummary);
+  try {
+    const origin = await getOrigin();
+    routeBetween(origin, [home.lat, home.lon]);
+  } catch (e) {
+    showError(e.message || "Couldn’t start routing to Home.");
+  }
+});
+
 elBtnMyLoc.onclick = async () => {
   hide(elErrors);
   try {
@@ -699,7 +687,7 @@ async function doSearch(q) {
     if (!Array.isArray(data) || !data.length) { hide(elResults); elResults.innerHTML = ""; return; }
     elResults.innerHTML = data.map(row => `
       <button data-lat="${row.lat}" data-lon="${row.lon}">
-        ${row.display_name.replaceAll("&", "&amp;")}
+        ${row.display_name.replaceAll("&","&amp;")}
       </button>
     `).join("");
     show(elResults);
@@ -714,6 +702,57 @@ async function doSearch(q) {
     });
   } catch {
     hide(elResults);
+  }
+}
+
+// ======= Home autocomplete (same UX as search) =======
+let homeTimer;
+if (elHomeInput && elHomeResults) {
+  elHomeInput.addEventListener("input", () => {
+    clearTimeout(homeTimer);
+    const q = elHomeInput.value.trim();
+    if (!q || q.length < 3) { elHomeResults.style.display = "none"; elHomeResults.innerHTML = ""; return; }
+    homeTimer = setTimeout(() => doHomeSearch(q), 350);
+  });
+
+  document.addEventListener("click", (e) => {
+    if (!elHomeResults.contains(e.target) && e.target !== elHomeInput) {
+      elHomeResults.style.display = "none";
+    }
+  });
+}
+
+async function doHomeSearch(q) {
+  const url = `https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=6&q=${encodeURIComponent(q)}`;
+  try {
+    const data = await getJSON(url, { "Accept-Language": "en" });
+    if (!Array.isArray(data) || !data.length) { elHomeResults.style.display = "none"; elHomeResults.innerHTML = ""; return; }
+    elHomeResults.innerHTML = data.map(row => `
+      <button data-lat="${row.lat}" data-lon="${row.lon}" data-display="${(row.display_name || "").replaceAll('"',"&quot;")}">
+        ${row.display_name.replaceAll("&","&amp;")}
+      </button>
+    ).join("");
+    elHomeResults.style.display = "";
+
+    [...elHomeResults.querySelectorAll("button")].forEach(btn => {
+      btn.onclick = () => {
+        const lat = parseFloat(btn.dataset.lat);
+        const lon = parseFloat(btn.dataset.lon);
+        const display = btn.dataset.display || "";
+        const label = labelFromAddress(rowAddress(btn), display);
+        setHome({ lat, lon, postcode: "", label });
+        elHomeInput.value = "";
+        elHomeResults.style.display = "none";
+        elHomeResults.innerHTML = "";
+      };
+    });
+  } catch {
+    elHomeResults.style.display = "none";
+  }
+
+  function rowAddress(btn) {
+    // We didn't embed full address JSON in the button; labelFromAddress will fall back to display string.
+    return null;
   }
 }
 
