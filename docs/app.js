@@ -424,8 +424,9 @@
     const sid = `s${String(stop.id).replace(/[^a-zA-Z0-9_-]/g, "")}`;
     const hdr = isBest ? `<div class="pill" style="background:#f59e0b;color:#fff;margin-bottom:6px;">Best stop</div>` : "";
     const nap = stop.naptan ? `<div class="muted">NaPTAN ${stop.naptan}</div>` : "";
-    const wxRow = (CFG.METOFFICE?.SHOW_INLINE === false) ? "" :
-      `<div id="wxline-${sid}" class="muted" style="margin-top:6px;">Loading weather…</div>`;
+   const wxRow = (CFG.METOFFICE?.SHOW_INLINE === false && !isBest)
+  ? ""
+  : `<div id="wxline-${sid}" class="muted" style="margin-top:6px;">Loading weather…</div>`;;
     const live = isTfLStop(stop.naptan)
       ? `<div id="arrivals-${sid}" class="muted" style="margin-top:6px;">Loading arrivals…</div>`
       : `<div class="muted" style="margin-top:6px;">Live arrivals not available here</div>`;
