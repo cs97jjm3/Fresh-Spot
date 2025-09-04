@@ -752,7 +752,7 @@ async function doHomeSearch(q) {
   } catch {
     elHomeResults.style.display = "none";
   }
-}
+
 
 
   function rowAddress(btn) {
