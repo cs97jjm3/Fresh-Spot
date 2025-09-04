@@ -123,12 +123,19 @@
         
         <div id="results" class="dropdown" style="display:none;">
 
-          <!-- Put inside <header> after the search box -->
-<span id="home-pill" class="pill" style="display:none;"></span>
-<button id="home-clear" class="btn" style="display:none; margin-left:6px;">Clear</button>
-
         </div>
       </div>
+      <!-- Home setup/display (enter once, then saved) -->
+<div id="home-setup" class="row" style="margin-left:12px; gap:6px;">
+  <input id="home-input" type="text" placeholder="Set Home (address or postcode) — one-time" style="padding:8px 10px; border:1px solid #e5e7eb; border-radius:10px; width:260px;" />
+  <button id="home-save" class="btn">Save</button>
+</div>
+
+<div id="home-view" class="row" style="margin-left:12px; gap:6px; display:none;">
+  <span id="home-display" class="pill"></span>
+  <button id="home-edit" class="btn">Change</button>
+</div>
+
     </header>
 
     <div class="main">
