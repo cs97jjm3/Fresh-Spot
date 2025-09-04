@@ -2,6 +2,8 @@
 const CONFIG = (window.FRESHSTOP_CONFIG || {});
 const OWM_KEY = CONFIG.OWM_KEY;
 const ORS_KEY = CONFIG.ORS_KEY;
+const TP_APP_ID  = CONFIG.TP_APP_ID;  // TransportAPI (optional for live times)
+const TP_APP_KEY = CONFIG.TP_APP_KEY; // TransportAPI (optional)
 
 if (!OWM_KEY) {
   console.warn("Missing OWM_KEY. Create config.js with window.FRESHSTOP_CONFIG. See instructions.");
@@ -52,6 +54,10 @@ let stopLayers = [];
 
 const wxNowCache = new Map();  // key: "lat,lon" ~ tile -> { temp, icon }
 const hourlyCache = new Map(); // key: tile -> [{ts,t,icon,tz},...]
+
+// ======= Units: miles & mph =======
+function miles(meters) { return (meters / 1609.344).toFixed(2); }
+function mph(ms)      { return Math.round(ms * 2.236936); }
 
 // ======= Home storage =======
 const HOME_KEY = "freshstop_home";
@@ -108,7 +114,7 @@ if ("geolocation" in navigator) {
 function show(el){ if(el) el.style.display=""; }
 function hide(el){ if(el) el.style.display="none"; }
 function setHTML(el,h){ if(el) el.innerHTML=h; }
-function km(m){ return (m/1000).toFixed(2); }
+function km(m){ return (m/1000).toFixed(2); } // retained if ever needed
 function minutes(s){ return Math.round(s/60); }
 function roundKey(lat,lon){ return `${lat.toFixed(2)},${lon.toFixed(2)}`; }
 function escapeHtml(s=""){ return s.replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;"); }
@@ -123,6 +129,14 @@ async function getOrigin(){
   if(myLocation) return myLocation;
   const pos=await getCurrentPosition(); myLocation=[pos.coords.latitude,pos.coords.longitude];
   L.circle(myLocation,{radius:6,color:"#0ea5e9",fillColor:"#0ea5e9",fillOpacity:0.7}).addTo(map); return myLocation;
+}
+
+// Remove all stop markers from the map
+function clearStops() {
+  for (const layer of stopLayers) {
+    try { layer.remove(); } catch {}
+  }
+  stopLayers = [];
 }
 
 // ======= Reverse geocode =======
@@ -168,7 +182,8 @@ async function loadWeatherAndForecast(lat,lng){
   const wx=await getJSON(`https://api.openweathermap.org/data/2.5/weather?lat=${lat}&lon=${lng}&units=metric&appid=${OWM_KEY}`);
   const t=Math.round(wx?.main?.temp??0);
   const feels=Math.round(wx?.main?.feels_like??0);
-  const wind=Math.round(wx?.wind?.speed??0);
+  const windMs=(wx?.wind?.speed??0);
+  const wind = mph(windMs); // mph
   const desc=(wx?.weather?.[0]?.description||"").replace(/^\w/,c=>c.toUpperCase());
   const place=[wx?.name,wx?.sys?.country].filter(Boolean).join(", ");
   const icon=wx?.weather?.[0]?.icon;
@@ -180,9 +195,7 @@ async function loadWeatherAndForecast(lat,lng){
     const one=await getJSON(`https://api.openweathermap.org/data/3.0/onecall?lat=${lat}&lon=${lng}&exclude=minutely,daily,alerts&units=metric&appid=${OWM_KEY}`);
     const tz = one?.timezone_offset || 0;
     hours=(one?.hourly||[]).slice(0,3).map(h=>({ts:h.dt,t:Math.round(h.temp),icon:h.weather?.[0]?.icon,tz}));
-  } catch {
-    // fallback not strictly needed
-  }
+  } catch {}
 
   setHTML(elWeather, `
     <div class="wx-top">
@@ -191,7 +204,7 @@ async function loadWeatherAndForecast(lat,lng){
         <div>
           <div class="wx-temp">${t}°C</div>
           <div class="wx-desc">${escapeHtml(desc)} ${place ? `• <span class="pill">${escapeHtml(place)}</span>` : ""}</div>
-          <div class="muted">Feels like ${feels}°C • Wind ${wind} m/s</div>
+          <div class="muted">Feels like ${feels}°C • Wind ${wind} mph</div>
         </div>
       </div>
     </div>
@@ -270,6 +283,16 @@ rel(bn)->.r;
   return (json.elements || []).filter(e => e.type === "relation");
 }
 
+// Read route relations that serve a stop and return short labels
+async function getStopRouteLabels(nodeId) {
+  const rels = await fetchStopRoutes(nodeId);
+  const labels = rels.map(r => {
+    const t = r.tags || {};
+    return t.ref || t.name || t["name:en"] || t.to || t.destination || "";
+  }).filter(Boolean);
+  return [...new Set(labels)].sort((a, b) => a.length - b.length).slice(0, 8);
+}
+
 // Home vicinity stops (for route intersection)
 async function fetchHomeAreaStops(home, radiusMeters = 600) {
   const q = `
@@ -311,36 +334,25 @@ rel(bn)->.r;
   return (json.elements || []).filter(e => e.type === "relation");
 }
 
-// ======= Robust: stops whose routes also serve Home area =======
+// Robust: stops whose routes also serve Home area (fallback: name heuristic)
 async function getStopsTowardHomeSet(stopsNearYou, home) {
-  // 1) Stops near home
   const homeStops = await fetchHomeAreaStops(home, 600);
-  if (!homeStops.length) {
-    return await nameHeuristicHomeSet(stopsNearYou, home); // fallback
-  }
+  if (!homeStops.length) return await nameHeuristicHomeSet(stopsNearYou, home);
 
-  // 2) Route relations that serve home stops
   const homeRelObjs = await fetchRouteRelationsByNodes(homeStops.map(s => s.id));
   const homeRelIds = new Set(homeRelObjs.map(r => r.id));
-  if (!homeRelIds.size) {
-    return await nameHeuristicHomeSet(stopsNearYou, home); // fallback
-  }
+  if (!homeRelIds.size) return await nameHeuristicHomeSet(stopsNearYou, home);
 
-  // 3) Keep nearby stops whose relations intersect homeRelIds
   const hitIds = new Set();
   for (const s of stopsNearYou) {
     try {
       const rels = await fetchStopRoutes(s.id);
       if (rels.some(r => homeRelIds.has(r.id))) hitIds.add(s.id);
-    } catch { /* ignore individual failures */ }
+    } catch {}
   }
   if (hitIds.size) return hitIds;
-
-  // 4) Still nothing? fallback to name heuristic
   return await nameHeuristicHomeSet(stopsNearYou, home);
 }
-
-// Fallback name-based heuristic (best effort)
 async function nameHeuristicHomeSet(stops, home) {
   const tokens = (home.label || home.postcode || "")
     .toLowerCase()
@@ -361,7 +373,7 @@ async function nameHeuristicHomeSet(stops, home) {
   return out;
 }
 
-// ======= Stops (with filter to Home) =======
+// ======= Stops (with filter to Home, routes, live times) =======
 async function loadStops(lat,lng,radius=800){
   elStopsRadius.textContent = radius;
   const q = `
@@ -383,12 +395,14 @@ out skel qt;
       const tags = e.tags || {};
       const isBus = tags.highway === "bus_stop" || tags.bus === "yes";
       const isTrain = /^station|halt|stop|tram_stop$/.test(tags.railway || "");
+      const atco = tags["naptan:AtcoCode"] || tags["ref:NaPTAN"] || tags["atcocode"] || null;
       return {
         id: e.id,
         name: tags.name || (isBus ? "Bus stop" : "Station"),
         kind: isTrain ? "train" : "bus",
         pos: [e.lat, e.lon],
-        dist: selectedPoint ? haversine(selectedPoint, [e.lat, e.lon]) : 0
+        dist: selectedPoint ? haversine(selectedPoint, [e.lat, e.lon]) : 0,
+        atco
       };
     })
     .sort((a,b)=>a.dist-b.dist)
@@ -433,7 +447,11 @@ out skel qt;
             ${escapeHtml(s.name)}
             ${homeSet && homeSet.has(s.id) ? `<span class="pill" style="margin-left:6px;">→ Home</span>` : ""}
           </div>
-          <div class="muted" style="font-size:12px;">${s.kind === "bus" ? "Bus stop" : "Train/Tram"} • ${Math.round(s.dist)} m</div>
+          <div class="muted" style="font-size:12px;">
+            ${s.kind === "bus" ? "Bus stop" : "Train/Tram"} • ${miles(s.dist)} mi
+            <span id="routes-${s.id}" class="muted" style="margin-left:6px;"></span>
+          </div>
+          <div id="live-${s.id}" class="muted" style="font-size:12px;"></div>
         </div>
       </div>
       <div style="display:flex; gap:6px; align-items:center;">
@@ -446,6 +464,27 @@ out skel qt;
 
   // Per-stop tiny weather
   await fillStopsWeather(stops);
+
+  // Fill per-stop route labels & live times
+  for (const s of stops) {
+    // OSM route labels
+    getStopRouteLabels(s.id).then(labels => {
+      const el = document.getElementById(`routes-${s.id}`);
+      if (el && labels.length) el.textContent = `• Routes: ${labels.join(", ")}`;
+    }).catch(()=>{});
+
+    // Live bus times (TransportAPI) - only for bus stops with ATCO and keys present
+    const liveEl = document.getElementById(`live-${s.id}`);
+    if (s.kind === "bus" && s.atco && TP_APP_ID && TP_APP_KEY) {
+      fetchLiveBusTimes(s.atco).then(rows => {
+        if (!liveEl) return;
+        if (!rows.length) { liveEl.textContent = "Live: n/a"; return; }
+        liveEl.textContent = "Live: " + rows.map(r => `${r.line} → ${r.dir} (${r.due})`).join(" • ");
+      }).catch(()=>{ if (liveEl) liveEl.textContent = "Live: n/a"; });
+    } else {
+      if (liveEl) liveEl.textContent = "Live: n/a";
+    }
+  }
 
   // Wire route buttons
   [...elStopsList.querySelectorAll("button[data-route]")].forEach(btn => {
@@ -487,6 +526,41 @@ async function fillStopsWeather(stops) {
       el.innerHTML = `<span class="pill">n/a</span>`;
     }
   }
+}
+
+// ======= TransportAPI: live bus times =======
+async function fetchLiveBusTimes(atco) {
+  if (!TP_APP_ID || !TP_APP_KEY) throw new Error("No TransportAPI keys");
+  const url = `https://transportapi.com/v3/uk/bus/stop/${encodeURIComponent(atco)}/live.json?app_id=${encodeURIComponent(TP_APP_ID)}&app_key=${encodeURIComponent(TP_APP_KEY)}&group=route&nextbuses=yes`;
+  const data = await getJSON(url);
+  const departures = data?.departures || {};
+  const lines = Object.keys(departures);
+  let out = [];
+  for (const line of lines) {
+    const arr = departures[line] || [];
+    for (const d of arr.slice(0, 2)) {
+      out.push({
+        line,
+        dir: d.direction || d.destination || "",
+        due: d.best_departure_estimate || d.best_departure_estimate_mins || d.aimed_departure_time || ""
+      });
+    }
+  }
+  const now = new Date();
+  out = out.slice(0, 4).map(x => {
+    const hhmm = /^(\d{2}):(\d{2})$/.exec(x.due || "");
+    if (hhmm) {
+      const t = new Date(now);
+      t.setHours(+hhmm[1], +hhmm[2], 0, 0);
+      let mins = Math.round((t - now) / 60000);
+      if (mins < 0) mins = 0;
+      return { ...x, due: `${mins} min` };
+    }
+    const n = parseInt(String(x.due).replace(/\D+/g, ""), 10);
+    if (!isNaN(n)) return { ...x, due: `${n} min` };
+    return x;
+  });
+  return out;
 }
 
 // ======= Routing =======
@@ -573,7 +647,8 @@ function drawRoute(route){
   if(routeLine) routeLine.remove();
   routeLine=L.polyline(coords,{weight:5}).addTo(map);
   map.fitBounds(L.latLngBounds(coords),{padding:[20,20]});
-  elRouteSummary.textContent=`Distance: ${km(distance)} km • Time: ${minutes(duration)} min`;
+  // miles + minutes
+  elRouteSummary.textContent=`Distance: ${miles(distance)} mi • Time: ${minutes(duration)} min`;
   show(elRouteSummary);
   if(steps && steps.length){
     setHTML(elDirSteps, steps.map((s,i)=>`<div class="dir-step">${i+1}. ${escapeHtml(s)}</div>`).join(""));
@@ -644,19 +719,12 @@ async function doHomeSearch(q){
         setHome({ lat, lon, label: display });
         elHomeInput.value="";
         elHomeResults.style.display="none"; elHomeResults.innerHTML="";
-        // If we already have a selection on map, refresh stops with the new filter
         if (selectedPoint) loadStops(selectedPoint[0], selectedPoint[1], 800);
       };
     });
   }catch{ elHomeResults.style.display="none"; }
 }
-// Remove all stop markers from the map
-function clearStops() {
-  for (const layer of stopLayers) {
-    try { layer.remove(); } catch {}
-  }
-  stopLayers = [];
-}
+
 // ======= Generic helpers =======
 async function getJSON(u,h={}){ const r=await fetch(u,{headers:{...h}}); if(!r.ok) throw new Error(`${r.status} ${r.statusText}`); return await r.json(); }
 function getCurrentPosition(){ return new Promise((resolve,reject)=>{ if(!navigator.geolocation) return reject(new Error("Geolocation unsupported")); navigator.geolocation.getCurrentPosition(resolve,reject,{enableHighAccuracy:true,timeout:10000}); }); }
