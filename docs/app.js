@@ -40,23 +40,17 @@
     iconSize: [22, 22], iconAnchor: [11, 11],
   });
 
-  // Pulse keyframes
-  (function injectPulseCSS() {
+  // Pulse + Spinner CSS
+  (function injectCSS() {
     const style = document.createElement("style");
     style.textContent = `
-      @keyframes pulse {
-        0% { transform:translate(-50%,-50%) scale(1); opacity:.85; }
-        70%{ transform:translate(-50%,-50%) scale(2.3); opacity:0; }
-        100%{ transform:translate(-50%,-50%) scale(2.3); opacity:0; }
-      }
-      @keyframes spin {
-        to { transform: rotate(360deg); }
-      }
+      @keyframes pulse { 0%{transform:translate(-50%,-50%) scale(1);opacity:.85}
+        70%{transform:translate(-50%,-50%) scale(2.3);opacity:0}
+        100%{transform:translate(-50%,-50%) scale(2.3);opacity:0} }
+      @keyframes spin { to { transform: rotate(360deg); } }
       #loading-overlay {
-        position: fixed; inset: 0;
-        display: none; align-items: center; justify-content: center;
-        background: rgba(255,255,255,0.6); backdrop-filter: blur(2px);
-        z-index: 9999;
+        position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
+        background: rgba(255,255,255,0.6); backdrop-filter: blur(2px); z-index: 9999;
       }
       #loading-overlay .box {
         display:flex; flex-direction:column; align-items:center; gap:10px;
@@ -118,7 +112,6 @@
   const elSelection = $("#selection");
   const elStops = $("#stops");
   const elStopsList = $("#stops-list");
-  const elBestLabel = $("#best-label");
   const elErrors = $("#errors");
 
   // -------------- Helpers ------------------
@@ -295,7 +288,8 @@
           lat: n.lat || n.center?.lat,
           lon: n.lon || n.center?.lon,
           name: n.tags?.name || "Bus stop",
-          naptan: n.tags?.["ref:GB:Naptan"] || null
+          // prefer official NaPTAN/ATCO where present
+          naptan: n.tags?.["naptan:AtcoCode"] || n.tags?.["ref:GB:Naptan"] || null
         }))
         .filter(s => s.lat && s.lon);
     } catch { return []; }
@@ -344,7 +338,6 @@
     if (selectedStopMarker) { map.removeLayer(selectedStopMarker); selectedStopMarker = null; }
     bestStopId = null;
     if (elStops) { elStops.style.display = "none"; elStopsList.innerHTML = ""; }
-    if (elBestLabel) elBestLabel.style.display = "none";
   }
   function clearRoute() {
     if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
@@ -353,6 +346,7 @@
   }
   $("#btn-clear-route")?.addEventListener("click", clearRoute);
 
+  // --------- TfL arrivals (London) ----------
   function isTfLStop(naptanId) { return !!naptanId && /^4900/i.test(naptanId); }
   function tflApimHeaders() { const k = CFG?.TFL?.SUBSCRIPTION_KEY; return k ? { "Ocp-Apim-Subscription-Key": k } : {}; }
   async function tflArrivals(naptanId) {
@@ -363,12 +357,68 @@
       if (!r.ok) return [];
       const j = await r.json();
       j.sort((a,b)=>a.timeToStation-b.timeToStation);
-      return j.slice(0,5).map(a => ({
+      return j.slice(0,6).map(a => ({
         line: a.lineName || a.lineId,
         dest: a.destinationName,
         etaMin: Math.max(0, Math.round((a.timeToStation || 0)/60)),
       }));
     } catch { return []; }
+  }
+
+  // --------- BODS (SIRI-VM) arrivals (outside London) ----------
+  function bodsEnabled() { return !!(CFG?.BODS?.ENABLED && CFG?.BODS?.API_KEY); }
+
+  async function bodsArrivalsNear(lat, lon) {
+    if (!bodsEnabled()) return [];
+    // ~1km bbox
+    const d = 0.01;
+    const minLat = (lat - d).toFixed(5);
+    const maxLat = (lat + d).toFixed(5);
+    const minLon = (lon - d).toFixed(5);
+    const maxLon = (lon + d).toFixed(5);
+    const url = `https://data.bus-data.dft.gov.uk/api/v1/datafeed?boundingBox=${minLat},${maxLat},${minLon},${maxLon}&api_key=${encodeURIComponent(CFG.BODS.API_KEY)}`;
+
+    try {
+      const r = await fetch(url, { headers: { "accept": "application/xml" } });
+      if (!r.ok) throw new Error(`BODS ${r.status}`);
+      const xml = await r.text();
+      const doc = new DOMParser().parseFromString(xml, "application/xml");
+      return Array.from(doc.getElementsByTagName("VehicleActivity"));
+    } catch (e) {
+      console.warn("BODS fetch failed", e);
+      return { error: (e?.message || "Fetch failed") };
+    }
+  }
+
+  function extractArrivalsForStop(activities, stopRef) {
+    if (!Array.isArray(activities)) return [];
+    const now = Date.now();
+    const norm = (s) => String(s || "").trim().toUpperCase();
+    const want = norm(stopRef);
+
+    const rows = [];
+    for (const a of activities) {
+      const mc = a.getElementsByTagName("MonitoredCall")[0];
+      if (!mc) continue;
+
+      const ref = mc.getElementsByTagName("StopPointRef")[0]?.textContent;
+      if (!ref || norm(ref) !== want) continue;
+
+      const line = a.getElementsByTagName("PublishedLineName")[0]?.textContent
+                || a.getElementsByTagName("LineRef")[0]?.textContent
+                || "Bus";
+      const dest = mc.getElementsByTagName("DestinationDisplay")[0]?.textContent || "";
+      const exp  = mc.getElementsByTagName("ExpectedArrivalTime")[0]?.textContent
+                || mc.getElementsByTagName("ExpectedDepartureTime")[0]?.textContent
+                || mc.getElementsByTagName("AimedArrivalTime")[0]?.textContent
+                || mc.getElementsByTagName("AimedDepartureTime")[0]?.textContent
+                || null;
+
+      if (!exp) continue;
+      const etaMin = Math.max(0, Math.round((new Date(exp).getTime() - now) / 60000));
+      rows.push({ line, dest, etaMin });
+    }
+    return rows.sort((x,y)=>x.etaMin - y.etaMin).slice(0, 6);
   }
 
   // --- Weather (inline): Met Office → Open-Meteo fallback ---
@@ -422,19 +472,30 @@
   // --- Popups with unique ids & reliable load ---
   function renderStopPopup(stop, isBest=false) {
     const sid = `s${String(stop.id).replace(/[^a-zA-Z0-9_-]/g, "")}`;
-    const hdr = isBest ? `<div class="pill" style="background:#f59e0b;color:#fff;margin-bottom:6px;">Best stop</div>` : "";
+
+    // Weather: always for best stop; else respect SHOW_INLINE
+    const wantWx = isBest || (CFG.METOFFICE?.SHOW_INLINE !== false);
+    const wxRow = wantWx ? `<div id="wxline-${sid}" class="muted" style="margin-top:6px;">Loading weather…</div>` : "";
+
+    // Live arrivals: TfL in London; BODS elsewhere (if enabled)
+    let live = `<div class="muted" style="margin-top:6px;">Live arrivals not available here</div>`;
+    if (isTfLStop(stop.naptan)) {
+      live = `<div id="arrivals-${sid}" class="muted" style="margin-top:6px;">Loading arrivals…</div>`;
+    } else if (bodsEnabled() && stop.naptan) {
+      live = `<div id="arrivals-${sid}" class="muted" style="margin-top:6px;">Loading arrivals…</div>`;
+    }
+
     const nap = stop.naptan ? `<div class="muted">NaPTAN ${stop.naptan}</div>` : "";
-   const wxRow = (CFG.METOFFICE?.SHOW_INLINE === false && !isBest)
-  ? ""
-  : `<div id="wxline-${sid}" class="muted" style="margin-top:6px;">Loading weather…</div>`;;
-    const live = isTfLStop(stop.naptan)
-      ? `<div id="arrivals-${sid}" class="muted" style="margin-top:6px;">Loading arrivals…</div>`
-      : `<div class="muted" style="margin-top:6px;">Live arrivals not available here</div>`;
+    const hdr = isBest ? `<div class="pill" style="background:#f59e0b;color:#fff;margin-bottom:6px;">Best stop</div>` : "";
+
     return `${hdr}<div style="font-weight:700">${stop.name}</div>${nap}${wxRow}${live}`;
   }
+
   async function enhanceStopPopup(stop) {
     const sid = `s${String(stop.id).replace(/[^a-zA-Z0-9_-]/g, "")}`;
-    if (CFG.METOFFICE?.SHOW_INLINE !== false) {
+
+    // Weather (best stop forced on)
+    if (stop.id === bestStopId || CFG.METOFFICE?.SHOW_INLINE !== false) {
       try {
         const line = await weatherLine(stop.lat, stop.lon);
         const el = document.getElementById(`wxline-${sid}`);
@@ -444,15 +505,32 @@
         if (el) el.textContent = "Weather unavailable";
       }
     }
+
+    // Live arrivals
+    const arrEl = document.getElementById(`arrivals-${sid}`);
+    if (!arrEl) return;
+
+    // London via TfL
     if (isTfLStop(stop.naptan)) {
       const arr = await tflArrivals(stop.naptan);
-      const el = document.getElementById(`arrivals-${sid}`);
-      if (el) {
-        el.innerHTML = arr.length
-          ? `<ul style="margin:4px 0 0 16px;">${arr.map(a=>`<li>${a.line} → ${a.dest} · ${a.etaMin} min</li>`).join("")}</ul>`
-          : "No live arrivals";
-      }
+      arrEl.innerHTML = arr.length
+        ? `<ul style="margin:4px 0 0 16px;">${arr.map(a=>`<li>${a.line} → ${a.dest} · ${a.etaMin} min</li>`).join("")}</ul>`
+        : "No live arrivals";
+      return;
     }
+
+    // Elsewhere via BODS
+    if (bodsEnabled() && stop.naptan) {
+      const res = await bodsArrivalsNear(stop.lat, stop.lon);
+      if (res?.error) { arrEl.textContent = "Live arrivals unavailable (BODS error/CORS)."; return; }
+      const rows = extractArrivalsForStop(res, stop.naptan);
+      arrEl.innerHTML = rows.length
+        ? `<ul style="margin:4px 0 0 16px;">${rows.map(a=>`<li>${a.line} → ${a.dest || "—"} · ${a.etaMin} min</li>`).join("")}</ul>`
+        : "No live arrivals for this stop right now.";
+      return;
+    }
+
+    arrEl.textContent = "Live arrivals not available here";
   }
 
   function addStopMarker(stop, isBest=false) {
@@ -482,7 +560,7 @@
       ].map(([x,y])=>[y,x]);
       if (coords.length) {
         if (routeLayer) map.removeLayer(routeLayer);
-        routeLayer = L.polyline(coords, { color: "#0ea5e9", weight: 5, opacity: 0.85 }).addTo(map);
+        routeLayer = L.polyline(coords, { color: routeColor, weight: 5, opacity: 0.85 }).addTo(map);
         const dEl = $("#directions"); const sEl = $("#directions-steps");
         if (dEl && sEl) {
           dEl.style.display = "block";
@@ -505,6 +583,8 @@
         </div>
       `;
     }
+
+    // Ensure popup is open before dynamic loads
     if (stop.id === bestStopId && bestStopMarker) {
       bestStopMarker.setIcon(BEST_SELECTED_ICON);
       bestStopMarker.setPopupContent(renderStopPopup(stop, true));
@@ -517,6 +597,7 @@
       selectedStopMarker.on("popupopen", () => enhanceStopPopup(stop));
       selectedStopMarker.openPopup();
     }
+
     await drawRouteVia(stop);
   }
 
@@ -532,11 +613,11 @@
 
       clearStopsUI();
       clearRoute();
-      $("#stops-radius") && ($("#stops-radius").textContent = String(SEARCH_RADIUS_METERS));
 
       let stops = await fetchStops(origin.lat, origin.lon, SEARCH_RADIUS_METERS);
       if (!stops.length) { showError("No stops found nearby."); return; }
 
+      // Pre-pick closest N to reduce routing calls
       const N = Math.min(8, stops.length);
       const subset = stops
         .map(s => ({ ...s, _d2: (s.lat-origin.lat)**2 + (s.lon-origin.lon)**2 }))
@@ -553,10 +634,9 @@
       bestStopId = best?.id || null;
 
       stops.forEach(s => addStopMarker(s, s.id === bestStopId));
-      if (best) {
-        elBestLabel && (elBestLabel.style.display = "inline-block");
+      if (best && bestStopMarker) {
         map.panTo([best.lat, best.lon], { animate: true });
-        if (bestStopMarker) bestStopMarker.openPopup();
+        bestStopMarker.openPopup();
       }
 
       if (elStops && elStopsList) {
