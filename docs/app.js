@@ -27,16 +27,16 @@
     html: `<div style="width:18px;height:18px;background:#ef4444;border:2px solid #fff;border-radius:50%;box-shadow:0 2px 8px rgba(0,0,0,.25)"></div>`,
     iconSize: [18, 18], iconAnchor: [9, 9],
   });
-  const BEST_PULSE_ICON = L.divIcon({
+  const BEST_BOARD_ICON = L.divIcon({
     className: "",
     html: `<div style="position:relative;width:18px;height:18px;border-radius:50%;background:#3b82f6;border:2px solid #fff;box-shadow:0 2px 10px rgba(0,0,0,.35)">
       <div style="position:absolute;left:50%;top:50%;width:18px;height:18px;transform:translate(-50%,-50%);border-radius:50%;border:2px solid rgba(59,130,246,.65);animation:pulse 1.6s ease-out infinite"></div>
     </div>`,
     iconSize: [18, 18], iconAnchor: [9, 9],
   });
-  const BEST_SELECTED_ICON = L.divIcon({
+  const BEST_ALIGHT_ICON = L.divIcon({
     className: "",
-    html: `<div style="width:22px;height:22px;background:#f59e0b;border:3px solid #fff;border-radius:50%;box-shadow:0 3px 12px rgba(0,0,0,.35)"></div>`,
+    html: `<div style="width:22px;height:22px;background:#10b981;border:3px solid #fff;border-radius:50%;box-shadow:0 3px 12px rgba(0,0,0,.35)"></div>`,
     iconSize: [22, 22], iconAnchor: [11, 11],
   });
 
@@ -70,11 +70,11 @@
     if (el) return el;
     el = document.createElement("div");
     el.id = "loading-overlay";
-    el.innerHTML = `<div class="box"><div class="spinner"></div><div class="muted">Finding best stop…</div></div>`;
+    el.innerHTML = `<div class="box"><div class="spinner"></div><div class="muted">Finding best stops…</div></div>`;
     document.body.appendChild(el);
     return el;
   }
-  function showLoading(msg = "Finding best stop…") {
+  function showLoading(msg = "Finding best stops…") {
     const el = ensureOverlay();
     const text = el.querySelector(".muted");
     if (text) text.textContent = msg;
@@ -96,12 +96,12 @@
   let homeMarker = null;
 
   const stopMarkers = new Map(); // id -> marker
-  let bestStopId = null;
-  let bestStopMarker = null;
-  let selectedStopMarker = null;
+  let bestBoard = null;          // best boarding stop (near origin)
+  let bestAlight = null;         // best alighting stop (near home)
+  let bestBoardMarker = null;
+  let bestAlightMarker = null;
 
-  let routeLayer = null;
-  const routeColor = "#0ea5e9";
+  let routeLayerGroup = null;    // FeatureGroup with both walking segments
 
   // -------------- UI elements --------------
   const elSearch = $("#search");
@@ -132,7 +132,7 @@
     if (!rev) return "";
     const a = rev.address || {};
     const town = a.town || a.city || a.village || a.hamlet || a.suburb || a.county || "";
-    thePc = a.postcode || ""; // keep postcode if present
+    const thePc = a.postcode || "";
     return [town, thePc].filter(Boolean).join(", ");
   }
   async function geocode(q) {
@@ -288,7 +288,6 @@
           lat: n.lat || n.center?.lat,
           lon: n.lon || n.center?.lon,
           name: n.tags?.name || "Bus stop",
-          // prefer official NaPTAN/ATCO where present (internal only)
           naptan: n.tags?.["naptan:AtcoCode"] || n.tags?.["ref:GB:Naptan"] || null
         }))
         .filter(s => s.lat && s.lon);
@@ -334,13 +333,13 @@
   function clearStopsUI() {
     stopMarkers.forEach((m) => map.removeLayer(m));
     stopMarkers.clear();
-    if (bestStopMarker) { map.removeLayer(bestStopMarker); bestStopMarker = null; }
-    if (selectedStopMarker) { map.removeLayer(selectedStopMarker); selectedStopMarker = null; }
-    bestStopId = null;
+    if (bestBoardMarker) { map.removeLayer(bestBoardMarker); bestBoardMarker = null; }
+    if (bestAlightMarker) { map.removeLayer(bestAlightMarker); bestAlightMarker = null; }
+    bestBoard = null; bestAlight = null;
     if (elStops) { elStops.style.display = "none"; elStopsList.innerHTML = ""; }
   }
   function clearRoute() {
-    if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
+    if (routeLayerGroup) { map.removeLayer(routeLayerGroup); routeLayerGroup = null; }
     $("#directions")?.style && ($("#directions").style.display = "none");
     const ds = $("#directions-steps"); if (ds) ds.innerHTML = "";
   }
@@ -367,10 +366,8 @@
 
   // --------- BODS (SIRI-VM) arrivals (outside London) ----------
   function bodsEnabled() { return !!(CFG?.BODS?.ENABLED && CFG?.BODS?.API_KEY); }
-
   async function bodsArrivalsNear(lat, lon) {
     if (!bodsEnabled()) return [];
-    // ~1km bbox
     const d = 0.01;
     const minLat = (lat - d).toFixed(5);
     const maxLat = (lat + d).toFixed(5);
@@ -389,7 +386,6 @@
       return { error: (e?.message || "Fetch failed") };
     }
   }
-
   function extractArrivalsForStop(activities, stopRef) {
     if (!Array.isArray(activities)) return [];
     const now = Date.now();
@@ -421,7 +417,47 @@
     return rows.sort((x,y)=>x.etaMin - y.etaMin).slice(0, 6);
   }
 
-  // --- Weather (inline): Met Office → Open-Meteo fallback ---
+  // --- Weather w/ icon (Met Office → Open-Meteo fallback) ---
+  function wxIconDataUri(kind){
+    // small inline SVGs (monochrome; auto-invert in dark UIs)
+    const base = (p)=>`data:image/svg+xml;utf8,${encodeURIComponent(
+      `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><g fill='currentColor'>${p}</g></svg>`
+    )}`;
+    const sun = base("<circle cx='12' cy='12' r='4'/><g stroke='currentColor' stroke-width='2' stroke-linecap='round' fill='none'><path d='M12 1v3M12 20v3M1 12h3M20 12h3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1'/></g>");
+    const cloud = base("<path d='M7 18h9a4 4 0 0 0 0-8 6 6 0 0 0-11 2 3 3 0 0 0 2 6z'/>");
+    const cloudSun = base("<circle cx='6' cy='8' r='2.5'/><path d='M7 18h9a4 4 0 0 0 0-8 6 6 0 0 0-11 2 3 3 0 0 0 2 6z'/>");
+    const rain = base("<path d='M7 18h9a4 4 0 0 0 0-8 6 6 0 0 0-11 2 3 3 0 0 0 2 6z'/><g stroke='currentColor' stroke-linecap='round'><path d='M9 20l-1 3'/><path d='M12 20l-1 3'/><path d='M15 20l-1 3'/></g>");
+    const drizzle = base("<path d='M7 18h9a4 4 0 0 0 0-8 6 6 0 0 0-11 2 3 3 0 0 0 2 6z'/><g stroke='currentColor' stroke-linecap='round'><path d='M9 20v2'/><path d='M12 20v2'/><path d='M15 20v2'/></g>");
+    const snow = base("<path d='M7 18h9a4 4 0 0 0 0-8 6 6 0 0 0-11 2 3 3 0 0 0 2 6z'/><g stroke='currentColor' stroke-linecap='round'><path d='M9 20l1 2M9 22l1-2'/><path d='M12 20l1 2M12 22l1-2'/><path d='M15 20l1 2M15 22l1-2'/></g>");
+    const thunder = base("<path d='M7 18h9a4 4 0 0 0 0-8 6 6 0 0 0-11 2 3 3 0 0 0 2 6z'/><path d='M11 12l-2 4h3l-1 4 4-6h-3l1-2z'/>");
+    const fog = base("<path d='M6 10h12M4 13h16M6 16h12'/>");
+    const map = {
+      clear: sun,
+      "mostly clear": sun,
+      "partly cloudy": cloudSun,
+      overcast: cloud,
+      fog,
+      drizzle,
+      rain,
+      showers: rain,
+      snow,
+      thunderstorm: thunder,
+      "thunder w/ hail": thunder
+    };
+    // default cloud
+    return map[kind] || cloud;
+  }
+  function wmCodeToText(code){
+    const MAP = {
+      0:"clear", 1:"mostly clear", 2:"partly cloudy", 3:"overcast",
+      45:"fog",48:"fog",51:"drizzle",53:"drizzle",55:"drizzle",
+      61:"rain",63:"rain",65:"rain",66:"rain",
+      71:"snow",73:"snow",75:"snow",77:"snow",
+      80:"showers",81:"showers",82:"showers",
+      95:"thunderstorm",96:"thunderstorm",99:"thunderstorm"
+    };
+    return MAP[code] || `code ${code}`;
+  }
   async function metOfficeSpot(lat, lon) {
     const MO = CFG.METOFFICE || {};
     if (!(MO.ENABLED && MO.API_KEY && MO.BASE)) return null;
@@ -435,19 +471,8 @@
       const t = Array.isArray(props.temperature) ? props.temperature[0] : null;
       const code = Array.isArray(props.significantWeatherCode) ? props.significantWeatherCode[0] : null;
       if (t == null && code == null) return null;
-      return { tempC: t, code };
+      return { tempC: t, kind: wmCodeToText(code) };
     } catch { return null; }
-  }
-  function wmCodeToText(code){
-    const MAP = {
-      0:"clear", 1:"mostly clear", 2:"partly cloudy", 3:"overcast",
-      45:"fog",48:"rime fog",51:"drizzle",53:"drizzle",55:"drizzle",
-      61:"rain",63:"rain",65:"rain",66:"freezing rain",67:"freezing rain",
-      71:"snow",73:"snow",75:"snow",77:"snow grains",
-      80:"showers",81:"showers",82:"heavy showers",
-      95:"thunderstorm",96:"thunder w/ hail",99:"thunder w/ hail"
-    };
-    return MAP[code] || `code ${code}`;
   }
   async function openMeteoNow(lat, lon){
     try{
@@ -458,54 +483,52 @@
       const t = j?.current?.temperature_2m;
       const code = j?.current?.weather_code;
       if (t==null && code==null) return null;
-      return { tempC: t, codeText: wmCodeToText(code) };
+      return { tempC: t, kind: wmCodeToText(code) };
     }catch{ return null; }
   }
-  async function weatherLine(lat, lon){
+  async function getWeather(lat, lon){
     const mo = await metOfficeSpot(lat, lon);
-    if (mo) return `${Math.round(mo.tempC)}°C · code ${mo.code}`;
+    if (mo) return mo;
     const om = await openMeteoNow(lat, lon);
-    if (om) return `${Math.round(om.tempC)}°C · ${om.codeText}`;
-    return "—";
+    if (om) return om;
+    return null;
   }
 
-  // --- Popups with unique ids & reliable load ---
-  function renderStopPopup(stop, isBest=false) {
+  // --- Popups with weather icon ---
+  function renderStopPopup(stop, role /* 'board' | 'alight' */) {
     const sid = `s${String(stop.id).replace(/[^a-zA-Z0-9_-]/g, "")}`;
+    const rolePill =
+      role === "board" ? `<div class="pill" style="background:#3b82f6;color:#fff;margin-bottom:6px;">Board here</div>` :
+      role === "alight" ? `<div class="pill" style="background:#10b981;color:#fff;margin-bottom:6px;">Alight here</div>` : "";
 
-    // WEATHER: always show (best or not)
-    const wxRow = `<div id="wxline-${sid}" class="muted" style="margin-top:6px;">Loading weather…</div>`;
+    const wxRow = `<div id="wxline-${sid}" class="stop-wx" style="margin-top:6px;">Loading weather…</div>`;
 
-    // Live arrivals: TfL in London; BODS elsewhere (if enabled)
     let live = `<div class="muted" style="margin-top:6px;">Live arrivals not available here</div>`;
-    if (isTfLStop(stop.naptan) || (bodsEnabled() && stop.naptan)) {
+    if (role === "board" && (isTfLStop(stop.naptan) || (bodsEnabled() && stop.naptan))) {
       live = `<div id="arrivals-${sid}" class="muted" style="margin-top:6px;">Loading arrivals…</div>`;
     }
 
-    // Friendlier header (hide NaPTAN code)
-    const hdr = isBest ? `<div class="pill" style="background:#f59e0b;color:#fff;margin-bottom:6px;">Best stop</div>` : "";
-
-    return `${hdr}<div style="font-weight:700">${stop.name}</div>${wxRow}${live}`;
+    return `${rolePill}<div style="font-weight:700">${stop.name}</div>${wxRow}${live}`;
   }
 
-  async function enhanceStopPopup(stop) {
+  async function enhanceStopPopup(stop, role) {
     const sid = `s${String(stop.id).replace(/[^a-zA-Z0-9_-]/g, "")}`;
-
-    // Weather (always)
+    const wxEl = document.getElementById(`wxline-${sid}`);
     try {
-      const line = await weatherLine(stop.lat, stop.lon);
-      const el = document.getElementById(`wxline-${sid}`);
-      if (el) el.textContent = line === "—" ? "Weather unavailable" : line;
-    } catch {
-      const el = document.getElementById(`wxline-${sid}`);
-      if (el) el.textContent = "Weather unavailable";
-    }
+      const wx = await getWeather(stop.lat, stop.lon);
+      if (wx && wxEl) {
+        const icon = wxIconDataUri(wx.kind);
+        wxEl.innerHTML = `<img alt="" src="${icon}" style="width:20px;height:20px;vertical-align:-4px;margin-right:6px;"> ${Math.round(wx.tempC)}°C · ${wx.kind}`;
+      } else if (wxEl) {
+        wxEl.textContent = "Weather unavailable";
+      }
+    } catch { if (wxEl) wxEl.textContent = "Weather unavailable"; }
 
-    // Live arrivals
+    if (role !== "board") return; // live arrivals only for boarding stop
+
     const arrEl = document.getElementById(`arrivals-${sid}`);
     if (!arrEl) return;
 
-    // London via TfL
     if (isTfLStop(stop.naptan)) {
       const arr = await tflArrivals(stop.naptan);
       arrEl.innerHTML = arr.length
@@ -514,7 +537,6 @@
       return;
     }
 
-    // Elsewhere via BODS
     if (bodsEnabled() && stop.naptan) {
       const res = await bodsArrivalsNear(stop.lat, stop.lon);
       if (res?.error) { arrEl.textContent = "Live arrivals unavailable (BODS error/CORS)."; return; }
@@ -522,82 +544,100 @@
       arrEl.innerHTML = rows.length
         ? `<ul style="margin:4px 0 0 16px;">${rows.map(a=>`<li>${a.line} → ${a.dest || "—"} · ${a.etaMin} min</li>`).join("")}</ul>`
         : "No live arrivals for this stop right now.";
-      return;
     }
-
-    arrEl.textContent = "Live arrivals not available here";
   }
 
-  function addStopMarker(stop, isBest=false) {
-    const icon = isBest ? BEST_PULSE_ICON : REGULAR_STOP_ICON;
-    const m = L.marker([stop.lat, stop.lon], { icon, zIndexOffset: isBest ? 400 : 0 })
+  function addStopMarker(stop, role /* 'board'|'alight'|'regular' */) {
+    const icon =
+      role === "board"  ? BEST_BOARD_ICON :
+      role === "alight" ? BEST_ALIGHT_ICON :
+      REGULAR_STOP_ICON;
+
+    const m = L.marker([stop.lat, stop.lon], { icon, zIndexOffset: role === "board" ? 400 : 0 })
       .addTo(map)
-      .bindPopup(renderStopPopup(stop, isBest));
-    m.on("popupopen", () => enhanceStopPopup(stop));
-    m.on("click", () => chooseStopAndRoute(stop));
-    stopMarkers.set(stop.id, m);
-    if (isBest) bestStopMarker = m;
+      .bindPopup(renderStopPopup(stop, role));
+    m.on("popupopen", () => enhanceStopPopup(stop, role));
+
+    stopMarkers.set(`${role}-${stop.id}`, m);
+    if (role === "board") bestBoardMarker = m;
+    if (role === "alight") bestAlightMarker = m;
+    return m;
   }
 
-  async function drawRouteVia(stop) {
+  function drawWalkingSegment(a, b, color) {
+    return L.polyline([[a.lat,a.lon],[b.lat,b.lon]].map(([y,x])=>[y,x]), {
+      color, weight: 5, opacity: 0.9, dashArray: "4 6"
+    });
+  }
+
+  async function drawRoutePair(board, alight) {
+    // Get OSRM polylines for both walking segments
     try {
       const a = `${origin.lon},${origin.lat}`;
-      const b = `${stop.lon},${stop.lat}`;
-      const c = `${home.lon},${home.lat}`;
+      const b = `${board.lon},${board.lat}`;
+      const c = `${alight.lon},${alight.lat}`;
+      const d = `${home.lon},${home.lat}`;
+
       const u1 = `${OSRM_BASE}/${a};${b}?overview=full&geometries=geojson`;
-      const u2 = `${OSRM_BASE}/${b};${c}?overview=full&geometries=geojson`;
+      const u2 = `${OSRM_BASE}/${c};${d}?overview=full&geometries=geojson`;
       const [r1, r2] = await Promise.all([fetch(u1), fetch(u2)]);
       if (!r1.ok || !r2.ok) return;
+
       const j1 = await r1.json(); const j2 = await r2.json();
-      const coords = [
-        ...(j1.routes?.[0]?.geometry?.coordinates || []),
-        ...(j2.routes?.[0]?.geometry?.coordinates || [])
-      ].map(([x,y])=>[y,x]);
-      if (coords.length) {
-        if (routeLayer) map.removeLayer(routeLayer);
-        routeLayer = L.polyline(coords, { color: routeColor, weight: 5, opacity: 0.85 }).addTo(map);
-        const dEl = $("#directions"); const sEl = $("#directions-steps");
-        if (dEl && sEl) {
-          dEl.style.display = "block";
-          sEl.innerHTML = `
-            <div class="dir-step">Walk to <b>${stop.name}</b>${stop.id===bestStopId ? " (best stop)" : ""}</div>
-            <div class="dir-step">Then continue on to <b>Home</b></div>
-          `;
-        }
+      const coords1 = (j1.routes?.[0]?.geometry?.coordinates || []).map(([x,y])=>[y,x]);
+      const coords2 = (j2.routes?.[0]?.geometry?.coordinates || []).map(([x,y])=>[y,x]);
+
+      if (routeLayerGroup) { map.removeLayer(routeLayerGroup); routeLayerGroup = null; }
+      routeLayerGroup = L.featureGroup().addTo(map);
+
+      if (coords1.length) routeLayerGroup.addLayer(L.polyline(coords1, { color: "#0ea5e9", weight: 5, opacity: 0.9 }));
+      if (coords2.length) routeLayerGroup.addLayer(L.polyline(coords2, { color: "#10b981", weight: 5, opacity: 0.9 }));
+
+      const dEl = $("#directions"); const sEl = $("#directions-steps");
+      if (dEl && sEl) {
+        dEl.style.display = "block";
+        sEl.innerHTML = `
+          <div class="dir-step">Walk to <b>${board.name}</b> (boarding)</div>
+          <div class="dir-step">Ride bus (time varies)</div>
+          <div class="dir-step">Alight at <b>${alight.name}</b></div>
+          <div class="dir-step">Walk to <b>Home</b></div>
+        `;
       }
-    } catch { /* ignore */ }
+
+      const bounds = routeLayerGroup.getBounds();
+      if (bounds.isValid()) map.fitBounds(bounds.pad(0.25));
+    } catch {/* ignore */}
   }
 
-  async function chooseStopAndRoute(stop) {
-    if (elSelection) {
-      elSelection.style.display = "block";
-      elSelection.innerHTML = `
-        <div class="kv">
-          <div><strong>${stop.name}</strong> ${stop.id===bestStopId ? `<span class="pill" style="background:#f59e0b;color:#fff;margin-left:6px;">Best stop</span>` : ""}</div>
-          <div class="muted">${toFixed(stop.lat)}, ${toFixed(stop.lon)}</div>
-        </div>
-      `;
-    }
-
-    // Ensure popup is open before dynamic loads
-    if (stop.id === bestStopId && bestStopMarker) {
-      bestStopMarker.setIcon(BEST_SELECTED_ICON);
-      bestStopMarker.setPopupContent(renderStopPopup(stop, true));
-      bestStopMarker.openPopup();
-    } else {
-      if (selectedStopMarker) { map.removeLayer(selectedStopMarker); selectedStopMarker = null; }
-      selectedStopMarker = L.marker([stop.lat, stop.lon], { icon: REGULAR_STOP_ICON })
-        .addTo(map)
-        .bindPopup(renderStopPopup(stop, false));
-      selectedStopMarker.on("popupopen", () => enhanceStopPopup(stop));
-      selectedStopMarker.openPopup();
-    }
-
-    await drawRouteVia(stop);
+  function updateSelectionPanel(board, alight, toBoardSec, fromAlightSec) {
+    if (!elSelection) return;
+    elSelection.style.display = "block";
+    elSelection.innerHTML = `
+      <div class="stack">
+        <div class="kv"><div><strong>${board.name}</strong> <span class="pill" style="background:#3b82f6;color:#fff;margin-left:6px;">Board</span></div><div class="muted">${toFixed(board.lat)}, ${toFixed(board.lon)}</div></div>
+        <div class="kv"><div><strong>${alight.name}</strong> <span class="pill" style="background:#10b981;color:#fff;margin-left:6px;">Alight</span></div><div class="muted">${toFixed(alight.lat)}, ${toFixed(alight.lon)}</div></div>
+        <div class="muted">Walking: to board <b>${fmtMin(toBoardSec)}</b> + from alight <b>${fmtMin(fromAlightSec)}</b> = <b>${fmtMin(toBoardSec + fromAlightSec)}</b></div>
+      </div>
+    `;
   }
 
-  async function findBestStop() {
-    showLoading("Finding best stop…");
+  async function choosePairAndRoute(board, alight, toBoardSec, fromAlightSec) {
+    bestBoard = board; bestAlight = alight;
+
+    // Markers
+    if (bestBoardMarker) { map.removeLayer(bestBoardMarker); bestBoardMarker = null; }
+    if (bestAlightMarker) { map.removeLayer(bestAlightMarker); bestAlightMarker = null; }
+    addStopMarker(board, "board");
+    addStopMarker(alight, "alight");
+    if (bestBoardMarker) { map.panTo([board.lat, board.lon], { animate: true }); bestBoardMarker.openPopup(); }
+
+    updateSelectionPanel(board, alight, toBoardSec, fromAlightSec);
+    await drawRoutePair(board, alight);
+  }
+
+  // ---------- Find best boarding + alighting pair ----------
+  async function findBestStopsPair() {
+    showLoading("Finding best stops…");
     try {
       showError("");
       if (!origin) {
@@ -609,67 +649,77 @@
       clearStopsUI();
       clearRoute();
 
-      let stops = await fetchStops(origin.lat, origin.lon, SEARCH_RADIUS_METERS);
-      if (!stops.length) { showError("No stops found nearby."); return; }
+      // Fetch candidates around origin & home
+      let originStops = await fetchStops(origin.lat, origin.lon, SEARCH_RADIUS_METERS);
+      let homeStops   = await fetchStops(home.lat, home.lon, SEARCH_RADIUS_METERS);
+      if (!originStops.length) { showError("No boarding stops found near origin."); return; }
+      if (!homeStops.length)   { showError("No alighting stops found near Home."); return; }
 
-      // Pre-pick closest N to reduce routing calls
-      const N = Math.min(8, stops.length);
-      const subset = stops
-        .map(s => ({ ...s, _d2: (s.lat-origin.lat)**2 + (s.lon-origin.lon)**2 }))
-        .sort((a,b)=>a._d2 - b._d2)
-        .slice(0, N);
+      // Pre-pick closest N for each to reduce routing calls
+      const N = 8;
+      const byDist = (base) => (s) => ({ ...s, _d2: (s.lat-base.lat)**2 + (s.lon-base.lon)**2 });
+      originStops = originStops.map(byDist(origin)).sort((a,b)=>a._d2-b._d2).slice(0, N);
+      homeStops   = homeStops.map(byDist(home)).sort((a,b)=>a._d2-b._d2).slice(0, N);
 
+      // Evaluate pairs by total walking (to board + from alight)
       let best = null;
-      for (const s of subset) {
-        const d1 = await routeDurationSec({lat:origin.lat,lon:origin.lon},{lat:s.lat,lon:s.lon});
-        const d2 = await routeDurationSec({lat:s.lat,lon:s.lon},{lat:home.lat,lon:home.lon});
-        s.walkToStopSec = d1; s.walkFromStopSec = d2; s.totalSec = d1 + d2;
-        if (!best || s.totalSec < best.totalSec) best = s;
-      }
-      bestStopId = best?.id || null;
-
-      stops.forEach(s => addStopMarker(s, s.id === bestStopId));
-      if (best && bestStopMarker) {
-        map.panTo([best.lat, best.lon], { animate: true });
-        bestStopMarker.openPopup();
+      const rows = [];
+      for (const b of originStops) {
+        const toBoardSec = await routeDurationSec({lat:origin.lat,lon:origin.lon},{lat:b.lat,lon:b.lon});
+        for (const a of homeStops) {
+          const fromAlightSec = await routeDurationSec({lat:a.lat,lon:a.lon},{lat:home.lat,lon:home.lon});
+          const totalSec = toBoardSec + fromAlightSec;
+          rows.push({ board:b, alight:a, toBoardSec, fromAlightSec, totalSec });
+          if (!best || totalSec < best.totalSec) best = { board:b, alight:a, toBoardSec, fromAlightSec, totalSec };
+        }
       }
 
+      // Render markers (regular for all, special for best pair)
+      originStops.forEach(s => addStopMarker(s, "regular"));
+      homeStops.forEach(s => addStopMarker(s, "regular"));
+
+      // List top 6 pairs
       if (elStops && elStopsList) {
         elStops.style.display = "block";
-        elStopsList.innerHTML = subset
-          .sort((a,b)=>a.totalSec - b.totalSec)
-          .map(s => `
-            <div class="stop-item" data-stop-id="${s.id}">
+        const top = rows.sort((a,b)=>a.totalSec - b.totalSec).slice(0, 6);
+        elStopsList.innerHTML = top.map((r, idx) => `
+            <div class="stop-item" data-idx="${idx}">
               <div class="stop-left">
-                <div class="stop-name">${s.name}</div>
-                ${s.id===bestStopId ? `<span class="pill" style="background:#f59e0b;color:#fff;">Best</span>` : ""}
+                <div>
+                  <div class="stop-name">Board: ${r.board.name}</div>
+                  <div class="muted">Alight: ${r.alight.name}</div>
+                </div>
+                ${r === top[0] ? `<span class="pill" style="background:#f59e0b;color:#fff;margin-left:6px;">Best</span>` : ""}
               </div>
               <div class="muted">
-                To stop: ${fmtMin(s.walkToStopSec)} · From stop: ${fmtMin(s.walkFromStopSec)} = <b>${fmtMin(s.totalSec)}</b>
+                To board: ${fmtMin(r.toBoardSec)} · From alight: ${fmtMin(r.fromAlightSec)} = <b>${fmtMin(r.totalSec)}</b>
               </div>
             </div>
-          `).join("");
+        `).join("");
 
         elStopsList.querySelectorAll(".stop-item").forEach(row => {
           row.addEventListener("click", () => {
-            const id = row.getAttribute("data-stop-id");
-            const s = subset.find(x => String(x.id) === String(id)) || stops.find(x => String(x.id) === String(id));
-            if (s) chooseStopAndRoute(s);
+            const idx = parseInt(row.getAttribute("data-idx"), 10);
+            const chosen = rows.sort((a,b)=>a.totalSec - b.totalSec).slice(0,6)[idx];
+            if (chosen) choosePairAndRoute(chosen.board, chosen.alight, chosen.toBoardSec, chosen.fromAlightSec);
           });
         });
       }
 
-      if (best) await chooseStopAndRoute(best);
+      if (best) await choosePairAndRoute(best.board, best.alight, best.toBoardSec, best.fromAlightSec);
     } finally {
       hideLoading();
     }
   }
 
   // Button
-  $("#btn-best-stop")?.addEventListener("click", findBestStop);
+  $("#btn-best-stop")?.addEventListener("click", findBestStopsPair);
 
   // ----- Boot: restore Home then try auto-locate -----
-  (function restoreHomeOnBoot(){ const saved = loadHome(); if (saved) applyHome(saved); })();
+  (function restoreHomeOnBoot(){
+    const saved = loadHome();
+    if (saved) applyHome(saved);
+  })();
   (async () => { await autoLocate(); })();
 
 })();
