@@ -48,9 +48,52 @@
         0% { transform:translate(-50%,-50%) scale(1); opacity:.85; }
         70%{ transform:translate(-50%,-50%) scale(2.3); opacity:0; }
         100%{ transform:translate(-50%,-50%) scale(2.3); opacity:0; }
+      }
+      @keyframes spin {
+        to { transform: rotate(360deg); }
+      }
+      #loading-overlay {
+        position: fixed; inset: 0;
+        display: none; align-items: center; justify-content: center;
+        background: rgba(255,255,255,0.6); backdrop-filter: blur(2px);
+        z-index: 9999;
+      }
+      #loading-overlay .box {
+        display:flex; flex-direction:column; align-items:center; gap:10px;
+        padding: 14px 18px; border-radius: 12px; background:#fff; border:1px solid #e5e7eb;
+        box-shadow: 0 6px 24px rgba(0,0,0,.12);
+      }
+      #loading-overlay .spinner {
+        width: 42px; height: 42px; border: 4px solid rgba(14,165,233,.25);
+        border-top-color: #0ea5e9; border-radius: 50%; animation: spin .9s linear infinite;
       }`;
     document.head.appendChild(style);
   })();
+
+  // -------------- Loading overlay --------------
+  function ensureOverlay() {
+    let el = document.getElementById("loading-overlay");
+    if (el) return el;
+    el = document.createElement("div");
+    el.id = "loading-overlay";
+    el.innerHTML = `<div class="box"><div class="spinner"></div><div class="muted">Finding best stop…</div></div>`;
+    document.body.appendChild(el);
+    return el;
+  }
+  function showLoading(msg = "Finding best stop…") {
+    const el = ensureOverlay();
+    const text = el.querySelector(".muted");
+    if (text) text.textContent = msg;
+    el.style.display = "flex";
+    const btn = $("#btn-best-stop");
+    if (btn) { btn.disabled = true; btn.setAttribute("aria-busy", "true"); }
+  }
+  function hideLoading() {
+    const el = document.getElementById("loading-overlay");
+    if (el) el.style.display = "none";
+    const btn = $("#btn-best-stop");
+    if (btn) { btn.disabled = false; btn.removeAttribute("aria-busy"); }
+  }
 
   // -------------- State --------------------
   let home = null;            // { lat, lon, display }
@@ -79,11 +122,7 @@
   const elErrors = $("#errors");
 
   // -------------- Helpers ------------------
-  function showError(msg) {
-    if (!elErrors) return;
-    elErrors.textContent = msg || "";
-    elErrors.style.display = msg ? "block" : "none";
-  }
+  function showError(msg) { if (elErrors) { elErrors.textContent = msg || ""; elErrors.style.display = msg ? "block" : "none"; } }
   function fmtMin(sec) { return `${Math.max(0, Math.round(sec/60))} min`; }
   const toFixed = (n, d=4) => Number.parseFloat(n).toFixed(d);
 
@@ -141,37 +180,24 @@
 
   // ---------------- Home persistence ----------------
   const HOME_KEY = "freshstop.home.v1";
-
-  function saveHome() {
-    try { localStorage.setItem(HOME_KEY, JSON.stringify(home)); } catch {}
-  }
-
+  function saveHome() { try { localStorage.setItem(HOME_KEY, JSON.stringify(home)); } catch {} }
   function loadHome() {
     try {
       const raw = localStorage.getItem(HOME_KEY);
       if (!raw) return null;
       const h = JSON.parse(raw);
-      if (h && Number.isFinite(h.lat) && Number.isFinite(h.lon) && typeof h.display === "string") {
-        return h;
-      }
+      if (h && Number.isFinite(h.lat) && Number.isFinite(h.lon) && typeof h.display === "string") return h;
     } catch {}
     return null;
   }
-
   function applyHome(h) {
-    // Apply to UI without reverse geocoding
     home = { lat: h.lat, lon: h.lon, display: h.display };
     if (homeMarker) map.removeLayer(homeMarker);
-    homeMarker = L.marker([home.lat, home.lon], { icon: DEST_ICON })
-      .addTo(map)
+    homeMarker = L.marker([home.lat, home.lon], { icon: DEST_ICON }).addTo(map)
       .bindPopup(`<b>Home</b><br>${home.display}`);
-    if (elHomePill) {
-      elHomePill.textContent = `Home: ${home.display}`;
-      elHomePill.style.display = "inline-block";
-    }
+    if (elHomePill) { elHomePill.textContent = `Home: ${home.display}`; elHomePill.style.display = "inline-block"; }
     if (elHomeInput) elHomeInput.style.display = "none";
   }
-
   function clearHome() {
     home = null;
     try { localStorage.removeItem(HOME_KEY); } catch {}
@@ -205,15 +231,11 @@
     const rev = await reverseGeocode(lat, lon);
     const display = formatTownPostcode(rev) || title || "Home";
     home = { lat, lon, display };
-    if (elHomePill) {
-      elHomePill.textContent = `Home: ${display}`;
-      elHomePill.style.display = "inline-block";
-    }
+    if (elHomePill) { elHomePill.textContent = `Home: ${display}`; elHomePill.style.display = "inline-block"; }
     if (elHomeInput) elHomeInput.style.display = "none";
     if (homeMarker) map.removeLayer(homeMarker);
     homeMarker = L.marker([lat, lon], { icon: DEST_ICON }).addTo(map)
       .bindPopup(`<b>Home</b><br>${display}`);
-
     saveHome(); // persist
   }
   elHomePill?.addEventListener("click", () => {
@@ -222,11 +244,7 @@
     elHomeInput.style.display = "block";
     elHomeInput.focus();
   });
-  // Optional: right-click to clear Home
-  elHomePill?.addEventListener("contextmenu", (e) => {
-    e.preventDefault();
-    if (confirm("Clear Home?")) clearHome();
-  });
+  elHomePill?.addEventListener("contextmenu", (e) => { e.preventDefault(); if (confirm("Clear Home?")) clearHome(); });
 
   // Attach search UIs
   attachDropdown(elSearch, elResults, ({ lat, lon, title }) => setOrigin({ lat, lon, label: title }));
@@ -240,19 +258,13 @@
     if (!navigator.geolocation) return false;
     return new Promise((resolve) => {
       navigator.geolocation.getCurrentPosition(
-        (pos) => {
-          const lat = pos.coords.latitude, lon = pos.coords.longitude;
-          setOrigin({ lat, lon, label: "My location" });
-          resolve(true);
-        },
+        (pos) => { const lat = pos.coords.latitude, lon = pos.coords.longitude; setOrigin({ lat, lon, label: "My location" }); resolve(true); },
         () => resolve(false),
         { enableHighAccuracy: true, timeout: 8000, maximumAge: 30000 }
       );
     });
   }
-  $("#btn-my-location")?.addEventListener("click", () => {
-    autoLocate().then(ok => { if (!ok) showError("Could not get your location."); });
-  });
+  $("#btn-my-location")?.addEventListener("click", () => { autoLocate().then(ok => { if (!ok) showError("Could not get your location."); }); });
   map.on("click", async (e) => {
     const { lat, lng } = e.latlng;
     const rev = await reverseGeocode(lat, lng);
@@ -261,8 +273,6 @@
   });
 
   // ---------------- Stops + routing ----------------
-
-  // Overpass stops
   async function fetchStopsOverpass(lat, lon, radiusM) {
     const q = `
       [out:json][timeout:25];
@@ -290,14 +300,9 @@
         .filter(s => s.lat && s.lon);
     } catch { return []; }
   }
-
-  // TfL nearby fallback (London areas)
   function tflUnifiedParams() {
     const id = CFG?.TFL?.APP_ID, key = CFG?.TFL?.APP_KEY;
-    if (key) {
-      const idq = id ? `&app_id=${encodeURIComponent(id)}` : "";
-      return `&app_key=${encodeURIComponent(key)}${idq}`;
-    }
+    if (key) { const idq = id ? `&app_id=${encodeURIComponent(id)}` : ""; return `&app_key=${encodeURIComponent(key)}${idq}`; }
     return "";
   }
   async function fetchStopsTfL(lat, lon, radiusM) {
@@ -316,15 +321,12 @@
       }));
     } catch { return []; }
   }
-
   async function fetchStops(lat, lon, radiusM) {
-    // Prefer Overpass; if no results, try TfL (good in London)
     let s = await fetchStopsOverpass(lat, lon, radiusM);
     if (!s.length) s = await fetchStopsTfL(lat, lon, radiusM);
     return s;
   }
 
-  // Routing helpers
   async function routeDurationSec(a, b) {
     try {
       const url = `${OSRM_BASE}/${a.lon},${a.lat};${b.lon},${b.lat}?overview=false&steps=false`;
@@ -344,7 +346,6 @@
     if (elStops) { elStops.style.display = "none"; elStopsList.innerHTML = ""; }
     if (elBestLabel) elBestLabel.style.display = "none";
   }
-
   function clearRoute() {
     if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
     $("#directions")?.style && ($("#directions").style.display = "none");
@@ -352,15 +353,10 @@
   }
   $("#btn-clear-route")?.addEventListener("click", clearRoute);
 
-  // TfL arrivals
   function isTfLStop(naptanId) { return !!naptanId && /^4900/i.test(naptanId); }
-  function tflApimHeaders() {
-    const k = CFG?.TFL?.SUBSCRIPTION_KEY;
-    return k ? { "Ocp-Apim-Subscription-Key": k } : {};
-  }
+  function tflApimHeaders() { const k = CFG?.TFL?.SUBSCRIPTION_KEY; return k ? { "Ocp-Apim-Subscription-Key": k } : {}; }
   async function tflArrivals(naptanId) {
     try {
-      // Build '?app_key=...' (tflUnifiedParams returns a string starting with '&')
       const qp = tflUnifiedParams();
       const url = `https://api.tfl.gov.uk/StopPoint/${encodeURIComponent(naptanId)}/arrivals${qp ? '?' + qp.slice(1) : ''}`;
       const r = await fetch(url, { headers: tflApimHeaders() });
@@ -435,11 +431,8 @@
       : `<div class="muted" style="margin-top:6px;">Live arrivals not available here</div>`;
     return `${hdr}<div style="font-weight:700">${stop.name}</div>${nap}${wxRow}${live}`;
   }
-
   async function enhanceStopPopup(stop) {
     const sid = `s${String(stop.id).replace(/[^a-zA-Z0-9_-]/g, "")}`;
-
-    // inline weather
     if (CFG.METOFFICE?.SHOW_INLINE !== false) {
       try {
         const line = await weatherLine(stop.lat, stop.lon);
@@ -450,8 +443,6 @@
         if (el) el.textContent = "Weather unavailable";
       }
     }
-
-    // TfL arrivals (London)
     if (isTfLStop(stop.naptan)) {
       const arr = await tflArrivals(stop.naptan);
       const el = document.getElementById(`arrivals-${sid}`);
@@ -469,7 +460,7 @@
       .addTo(map)
       .bindPopup(renderStopPopup(stop, isBest));
     m.on("popupopen", () => enhanceStopPopup(stop));
-    m.on("click", () => chooseStopAndRoute(stop)); // selecting also routes
+    m.on("click", () => chooseStopAndRoute(stop));
     stopMarkers.set(stop.id, m);
     if (isBest) bestStopMarker = m;
   }
@@ -490,7 +481,7 @@
       ].map(([x,y])=>[y,x]);
       if (coords.length) {
         if (routeLayer) map.removeLayer(routeLayer);
-        routeLayer = L.polyline(coords, { color: routeColor, weight: 5, opacity: 0.85 }).addTo(map);
+        routeLayer = L.polyline(coords, { color: "#0ea5e9", weight: 5, opacity: 0.85 }).addTo(map);
         const dEl = $("#directions"); const sEl = $("#directions-steps");
         if (dEl && sEl) {
           dEl.style.display = "block";
@@ -504,7 +495,6 @@
   }
 
   async function chooseStopAndRoute(stop) {
-    // Selection card
     if (elSelection) {
       elSelection.style.display = "block";
       elSelection.innerHTML = `
@@ -514,8 +504,6 @@
         </div>
       `;
     }
-
-    // Ensure popup is open *before* we load dynamic weather/arrivals
     if (stop.id === bestStopId && bestStopMarker) {
       bestStopMarker.setIcon(BEST_SELECTED_ICON);
       bestStopMarker.setPopupContent(renderStopPopup(stop, true));
@@ -528,91 +516,83 @@
       selectedStopMarker.on("popupopen", () => enhanceStopPopup(stop));
       selectedStopMarker.openPopup();
     }
-
     await drawRouteVia(stop);
   }
 
   async function findBestStop() {
-    showError("");
-    // Ensure we have origin; try to auto-locate if not
-    if (!origin) {
-      const ok = await autoLocate();
-      if (!ok) { showError("Pick an origin (tap the map) or allow location."); return; }
-    }
-    if (!home) { showError("Set your Home first."); return; }
+    showLoading("Finding best stop…");
+    try {
+      showError("");
+      if (!origin) {
+        const ok = await autoLocate();
+        if (!ok) { showError("Pick an origin (tap the map) or allow location."); return; }
+      }
+      if (!home) { showError("Set your Home first."); return; }
 
-    // reset UI
-    clearStopsUI();
-    clearRoute();
-    $("#stops-radius") && ($("#stops-radius").textContent = String(SEARCH_RADIUS_METERS));
+      clearStopsUI();
+      clearRoute();
+      $("#stops-radius") && ($("#stops-radius").textContent = String(SEARCH_RADIUS_METERS));
 
-    // Load nearby stops
-    let stops = await fetchStops(origin.lat, origin.lon, SEARCH_RADIUS_METERS);
-    if (!stops.length) { showError("No stops found nearby."); return; }
+      let stops = await fetchStops(origin.lat, origin.lon, SEARCH_RADIUS_METERS);
+      if (!stops.length) { showError("No stops found nearby."); return; }
 
-    // Pre-pick closest N to limit routing calls
-    const N = Math.min(8, stops.length);
-    const subset = stops
-      .map(s => ({ ...s, _d2: (s.lat-origin.lat)**2 + (s.lon-origin.lon)**2 }))
-      .sort((a,b)=>a._d2 - b._d2)
-      .slice(0, N);
+      const N = Math.min(8, stops.length);
+      const subset = stops
+        .map(s => ({ ...s, _d2: (s.lat-origin.lat)**2 + (s.lon-origin.lon)**2 }))
+        .sort((a,b)=>a._d2 - b._d2)
+        .slice(0, N);
 
-    // Score by walking time origin->stop + stop->home
-    let best = null;
-    for (const s of subset) {
-      const d1 = await routeDurationSec({lat:origin.lat,lon:origin.lon},{lat:s.lat,lon:s.lon});
-      const d2 = await routeDurationSec({lat:s.lat,lon:s.lon},{lat:home.lat,lon:home.lon});
-      s.walkToStopSec = d1; s.walkToHomeSec = d2; s.totalSec = d1 + d2;
-      if (!best || s.totalSec < best.totalSec) best = s;
-    }
-    bestStopId = best?.id || null;
+      let best = null;
+      for (const s of subset) {
+        const d1 = await routeDurationSec({lat:origin.lat,lon:origin.lon},{lat:s.lat,lon:s.lon});
+        const d2 = await routeDurationSec({lat:s.lat,lon:s.lon},{lat:home.lat,lon:home.lon});
+        s.walkToStopSec = d1; s.walkToHomeSec = d2; s.totalSec = d1 + d2;
+        if (!best || s.totalSec < best.totalSec) best = s;
+      }
+      bestStopId = best?.id || null;
 
-    // Plot all stops (best pulses)
-    stops.forEach(s => addStopMarker(s, s.id === bestStopId));
-    if (best) {
-      elBestLabel && (elBestLabel.style.display = "inline-block");
-      map.panTo([best.lat, best.lon], { animate: true });
-      if (bestStopMarker) bestStopMarker.openPopup(); // will trigger weather/arrivals
-    }
+      stops.forEach(s => addStopMarker(s, s.id === bestStopId));
+      if (best) {
+        elBestLabel && (elBestLabel.style.display = "inline-block");
+        map.panTo([best.lat, best.lon], { animate: true });
+        if (bestStopMarker) bestStopMarker.openPopup();
+      }
 
-    // Sidebar list
-    if (elStops && elStopsList) {
-      elStops.style.display = "block";
-      elStopsList.innerHTML = subset
-        .sort((a,b)=>a.totalSec - b.totalSec)
-        .map(s => `
-          <div class="stop-item" data-stop-id="${s.id}">
-            <div class="stop-left">
-              <div class="stop-name">${s.name}</div>
-              ${s.naptan ? `<span class="pill">NaPTAN ${s.naptan}</span>` : ""}
-              ${s.id===bestStopId ? `<span class="pill" style="background:#f59e0b;color:#fff;">Best</span>` : ""}
+      if (elStops && elStopsList) {
+        elStops.style.display = "block";
+        elStopsList.innerHTML = subset
+          .sort((a,b)=>a.totalSec - b.totalSec)
+          .map(s => `
+            <div class="stop-item" data-stop-id="${s.id}">
+              <div class="stop-left">
+                <div class="stop-name">${s.name}</div>
+                ${s.naptan ? `<span class="pill">NaPTAN ${s.naptan}</span>` : ""}
+                ${s.id===bestStopId ? `<span class="pill" style="background:#f59e0b;color:#fff;">Best</span>` : ""}
+              </div>
+              <div class="muted">Walk: ${fmtMin(s.walkToStopSec)} + ${fmtMin(s.walkToHomeSec)} = <b>${fmtMin(s.totalSec)}</b></div>
             </div>
-            <div class="muted">Walk: ${fmtMin(s.walkToStopSec)} + ${fmtMin(s.walkToHomeSec)} = <b>${fmtMin(s.totalSec)}</b></div>
-          </div>
-        `).join("");
+          `).join("");
 
-      // Click to select & route
-      elStopsList.querySelectorAll(".stop-item").forEach(row => {
-        row.addEventListener("click", () => {
-          const id = row.getAttribute("data-stop-id");
-          const s = subset.find(x => String(x.id) === String(id)) || stops.find(x => String(x.id) === String(id));
-          if (s) chooseStopAndRoute(s);
+        elStopsList.querySelectorAll(".stop-item").forEach(row => {
+          row.addEventListener("click", () => {
+            const id = row.getAttribute("data-stop-id");
+            const s = subset.find(x => String(x.id) === String(id)) || stops.find(x => String(x.id) === String(id));
+            if (s) chooseStopAndRoute(s);
+          });
         });
-      });
-    }
+      }
 
-    // Auto-route to best
-    if (best) await chooseStopAndRoute(best);
+      if (best) await chooseStopAndRoute(best);
+    } finally {
+      hideLoading();
+    }
   }
 
   // Button
   $("#btn-best-stop")?.addEventListener("click", findBestStop);
 
-  // ----- Boot: restore Home then try auto-locate so "best stop" just works -----
-  (function restoreHomeOnBoot(){
-    const saved = loadHome();
-    if (saved) applyHome(saved);
-  })();
+  // ----- Boot: restore Home then try auto-locate -----
+  (function restoreHomeOnBoot(){ const saved = loadHome(); if (saved) applyHome(saved); })();
   (async () => { await autoLocate(); })();
 
 })();
