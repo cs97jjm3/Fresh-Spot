@@ -24,6 +24,10 @@ const elBtnRoute = document.getElementById("btn-route");
 const elBtnClearRoute = document.getElementById("btn-clear-route");
 const elRouteSummary = document.getElementById("route-summary");
 
+// Route-from toggle (optional, but recommended in index.html)
+const elRFMy = document.getElementById("rf-myloc");
+const elRFSel = document.getElementById("rf-selected");
+
 // ======= Map setup =======
 const map = L.map("map");
 const osm = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
@@ -41,8 +45,8 @@ let routeLine = null;
 let stopLayers = [];         // circle markers for stops
 
 // Simple in-memory caches to avoid hammering OWM
-const wxNowCache = new Map();     // key: lat,lon rounded -> { temp, icon, desc, name, country }
-const hourlyCache = new Map();    // key: lat,lon rounded -> [hourly items]
+const wxNowCache = new Map();     // key: "lat,lon" rounded -> { temp, icon, desc, name, country }
+const hourlyCache = new Map();    // key: "lat,lon" rounded -> [hourly items]
 
 // click to select point
 map.on("click", (e) => {
@@ -62,12 +66,20 @@ if ("geolocation" in navigator) {
 }
 
 // ======= UI helpers =======
-function show(el) { el.style.display = ""; }
-function hide(el) { el.style.display = "none"; }
-function setHTML(el, html) { el.innerHTML = html; }
+function show(el) { if (el) el.style.display = ""; }
+function hide(el) { if (el) el.style.display = "none"; }
+function setHTML(el, html) { if (el) el.innerHTML = html; }
 function km(meters) { return (meters / 1000).toFixed(2); }
 function minutes(seconds) { return Math.round(seconds / 60); }
 function roundKey(lat, lon) { return `${lat.toFixed(2)},${lon.toFixed(2)}`; } // ~1-2km tile
+function escapeHtml(s="") {
+  return s.replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;");
+}
+function iconUrl(code) { return `https://openweathermap.org/img/wn/${code}@2x.png`; }
+function hourStr(ts, tzOffsetSec = 0) {
+  const d = new Date((ts + tzOffsetSec) * 1000);
+  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
 function haversine(a, b) {
   const toRad = d => d * Math.PI / 180;
   const R = 6371000;
@@ -78,13 +90,47 @@ function haversine(a, b) {
   const h = Math.sin(dLat/2)**2 + Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLon/2)**2;
   return 2*R*Math.asin(Math.sqrt(h));
 }
-function escapeHtml(s="") {
-  return s.replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;");
+
+// ======= Route-from toggle helpers =======
+function getRouteFromMode() {
+  // default to "myloc" if the radios aren't present
+  if (!elRFMy || !elRFSel) return "myloc";
+  return elRFSel.checked ? "selected" : "myloc";
 }
-function iconUrl(code) { return `https://openweathermap.org/img/wn/${code}@2x.png`; }
-function hourStr(ts, tzOffsetSec = 0) {
-  const d = new Date((ts + tzOffsetSec) * 1000);
-  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+async function getOrigin() {
+  const mode = getRouteFromMode();
+
+  if (mode === "selected") {
+    if (!selectedPoint) throw new Error("Pick a point on the map first.");
+    return selectedPoint;
+  }
+
+  // mode === "myloc"
+  if (myLocation) return myLocation;
+
+  const pos = await getCurrentPosition();
+  myLocation = [pos.coords.latitude, pos.coords.longitude];
+  L.circle(myLocation, { radius: 6, color: "#0ea5e9", fillColor: "#0ea5e9", fillOpacity: 0.7 }).addTo(map);
+  return myLocation;
+}
+
+// ======= Reverse geocode (Nominatim) =======
+async function reverseGeocode(lat, lon) {
+  const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}&addressdetails=1`;
+  const data = await getJSON(url, { "Accept-Language": "en" });
+  const a = data?.address || {};
+  const parts = [
+    [a.road, a.pedestrian, a.footway, a.cycleway, a.path].find(Boolean),
+    a.suburb || a.neighbourhood || a.village || a.hamlet,
+    a.town || a.city || a.county,
+    a.postcode
+  ].filter(Boolean);
+  return {
+    line: parts.join(", "),
+    display: data?.display_name || "",
+    postcode: a.postcode || "",
+  };
 }
 
 // ======= Selection workflow =======
@@ -107,20 +153,42 @@ async function setSelected([lat, lng], source = "") {
   clearStops();
   clearRoute();
 
-  // selection card
+  // selection card (friendly address, keeps coords)
   const latTxt = lat.toFixed(5);
   const lngTxt = lng.toFixed(5);
+
   setHTML(elSelection, `
     <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
       <div>
-        <div style="font-weight:600; margin-bottom:4px;">Selected location</div>
-        <div class="muted">${latTxt}, ${lngTxt}${source ? ` • <span title="How you picked this">${source}</span>` : ""}</div>
+        <div style="font-weight:700; margin-bottom:4px;">Selected location</div>
+        <div class="muted">Looking up address…</div>
       </div>
       <button class="btn" id="btn-copy">Copy coords</button>
     </div>
   `);
   show(elSelection);
   document.getElementById("btn-copy").onclick = () => navigator.clipboard?.writeText(`${latTxt}, ${lngTxt}`);
+
+  try {
+    const rev = await reverseGeocode(lat, lng);
+    const pretty = rev.line || rev.display || `${latTxt}, ${lngTxt}`;
+    setHTML(elSelection, `
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
+        <div>
+          <div style="font-weight:700; margin-bottom:4px;">Selected location</div>
+          <div>${escapeHtml(pretty)}${source ? ` • <span class="muted">${escapeHtml(source)}</span>` : ""}</div>
+          <div class="muted" style="font-size:12px;">${latTxt}, ${lngTxt}</div>
+        </div>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <button class="btn" id="btn-copy">Copy coords</button>
+          ${rev.postcode ? `<span class="pill" title="Postcode">${escapeHtml(rev.postcode)}</span>` : ""}
+        </div>
+      </div>
+    `);
+    document.getElementById("btn-copy").onclick = () => navigator.clipboard?.writeText(`${latTxt}, ${lngTxt}`);
+  } catch {
+    // keep default coords-only view if reverse fails
+  }
 
   // load weather + air + stops (in parallel)
   try {
@@ -153,7 +221,7 @@ async function loadWeatherAndForecast(lat, lng) {
     temp: t, icon, desc, name: wx?.name, country: wx?.sys?.country
   });
 
-  // Try OneCall hourly (hourly forecast) — fallback to 3-hour /forecast if unavailable
+  // Try OneCall hourly; fallback to /forecast 3-hourly
   let hours = [];
   try {
     const one = await getJSON(`https://api.openweathermap.org/data/3.0/onecall?lat=${lat}&lon=${lng}&exclude=minutely,daily,alerts&units=metric&appid=${OWM_KEY}`);
@@ -162,7 +230,6 @@ async function loadWeatherAndForecast(lat, lng) {
       ts: h.dt, t: Math.round(h.temp), icon: h.weather?.[0]?.icon, tz
     }));
   } catch {
-    // Fallback: 3h forecast — take first two buckets (approx next 2-6 hours)
     const fc = await getJSON(`https://api.openweathermap.org/data/2.5/forecast?lat=${lat}&lon=${lng}&units=metric&cnt=2&appid=${OWM_KEY}`);
     hours = (fc?.list || []).map(h => ({
       ts: Math.floor(new Date(h.dt_txt).getTime()/1000),
@@ -194,7 +261,7 @@ async function loadWeatherAndForecast(lat, lng) {
           ${h.icon ? `<img src="${iconUrl(h.icon)}" alt="" />` : ""}
           <div class="t">${h.t}°C</div>
         </div>
-      `).join("")}
+      ").join("")}
     </div>
   `);
   show(elWeather);
@@ -221,13 +288,8 @@ async function loadAir(lat, lng) {
   const comp = air?.list?.[0]?.components || {};
   const [label, cls] = aqiClass(main.aqi || 0);
 
-  // Key pollutants with indicative scales (μg/m³): rough, for visual only
-  const scales = {
-    pm2_5: 75,   // WHO 24h guideline is lower; using higher cap for bar range
-    pm10: 150,
-    no2: 200,
-    o3: 180
-  };
+  // Indicative scales for bar rendering (μg/m³)
+  const scales = { pm2_5: 75, pm10: 150, no2: 200, o3: 180 };
 
   setHTML(elAir, `
     <div style="display:flex; align-items:center; justify-content:space-between;">
@@ -296,7 +358,7 @@ out skel qt;
     stopLayers.push(m);
   }
 
-  // Render list first (with placeholders for weather)
+  // Render list (placeholders for weather)
   setHTML(elStopsList, stops.map(s => `
     <div class="stop-item" data-stop="${s.id}">
       <div class="stop-left">
@@ -308,31 +370,28 @@ out skel qt;
       </div>
       <div style="display:flex; gap:6px; align-items:center;">
         <span class="stop-kind ${s.kind === "bus" ? "kind-bus" : "kind-train"}">${s.kind}</span>
-        <button class="btn" data-route="${s.id}" title="Route from my location to this stop">Route</button>
+        <button class="btn" data-route="${s.id}" title="Route from chosen origin to this stop">Route</button>
       </div>
     </div>
   `).join(""));
   show(elStops);
 
-  // Fill in weather for each stop (cached + limited)
+  // Fill weather for each stop (cached + limited)
   await fillStopsWeather(stops);
-  // Wire up route buttons
+
+  // Wire route buttons – use origin based on toggle
   [...elStopsList.querySelectorAll("button[data-route]")].forEach(btn => {
     btn.onclick = async () => {
-      if (!myLocation) {
-        try {
-          const pos = await getCurrentPosition();
-          myLocation = [pos.coords.latitude, pos.coords.longitude];
-          L.circle(myLocation, { radius: 6, color: "#0ea5e9", fillColor: "#0ea5e9", fillOpacity: 0.7 }).addTo(map);
-        } catch {
-          showError("Couldn’t read your location. Click ‘Use my location’ first.");
-          return;
-        }
+      hide(elErrors);
+      try {
+        const origin = await getOrigin();
+        const id = btn.getAttribute("data-route");
+        const s = stops.find(x => x.id.toString() === id);
+        if (!s) return;
+        routeBetween(origin, s.pos);
+      } catch (err) {
+        showError(err.message || "Couldn’t start routing.");
       }
-      const id = btn.getAttribute("data-route");
-      const s = stops.find(x => x.id.toString() === id);
-      if (!s) return;
-      routeBetween(myLocation, s.pos);
     };
   });
 }
@@ -360,7 +419,6 @@ async function fillStopsWeather(stops) {
         // ignore
       }
     }
-    // Render
     const el = document.getElementById(`wx-${s.id}`);
     if (!el) continue;
     if (wx && wx.icon != null) {
@@ -391,22 +449,17 @@ elBtnRoute.onclick = async () => {
   hide(elErrors);
   hide(elRouteSummary);
 
-  if (!myLocation) {
-    try {
-      const pos = await getCurrentPosition();
-      myLocation = [pos.coords.latitude, pos.coords.longitude];
-      L.circle(myLocation, { radius: 6, color: "#0ea5e9", fillColor: "#0ea5e9", fillOpacity: 0.7 }).addTo(map);
-    } catch {
-      showError("Couldn’t read your location. Click ‘Use my location’ first.");
-      return;
+  try {
+    if (!selectedPoint) throw new Error("Pick a destination on the map (or via search) first.");
+    const origin = await getOrigin();
+    const dest = selectedPoint;
+    if (origin[0] === dest[0] && origin[1] === dest[1]) {
+      throw new Error("Origin and destination are the same. Switch the ‘Route from’ option or pick a different point.");
     }
+    routeBetween(origin, dest);
+  } catch (err) {
+    showError(err.message || "Couldn’t start routing.");
   }
-  if (!selectedPoint) {
-    showError("Pick a destination on the map (or via search) first.");
-    return;
-  }
-
-  routeBetween(myLocation, selectedPoint);
 };
 
 elBtnMyLoc.onclick = async () => {
@@ -421,11 +474,11 @@ elBtnMyLoc.onclick = async () => {
   }
 };
 
-elBtnClearRoute.onclick = () => {
+elBtnClearRoute && (elBtnClearRoute.onclick = () => {
   clearRoute();
   hide(elDirections);
   hide(elRouteSummary);
-};
+});
 
 function clearRoute() {
   if (routeLine) routeLine.remove();
