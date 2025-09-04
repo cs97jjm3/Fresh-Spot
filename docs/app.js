@@ -650,7 +650,13 @@ async function doHomeSearch(q){
     });
   }catch{ elHomeResults.style.display="none"; }
 }
-
+// Remove all stop markers from the map
+function clearStops() {
+  for (const layer of stopLayers) {
+    try { layer.remove(); } catch {}
+  }
+  stopLayers = [];
+}
 // ======= Generic helpers =======
 async function getJSON(u,h={}){ const r=await fetch(u,{headers:{...h}}); if(!r.ok) throw new Error(`${r.status} ${r.statusText}`); return await r.json(); }
 function getCurrentPosition(){ return new Promise((resolve,reject)=>{ if(!navigator.geolocation) return reject(new Error("Geolocation unsupported")); navigator.geolocation.getCurrentPosition(resolve,reject,{enableHighAccuracy:true,timeout:10000}); }); }
