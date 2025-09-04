@@ -129,6 +129,20 @@
         <div id="map"></div>
         <div style="padding:12px; border-top:1px solid var(--line); display:flex; gap:8px; flex-wrap: wrap; align-items:center; background:#fff;">
           <button id="btn-my-location" class="btn">Use my location</button>
+
+<label class="pill" style="display:flex; gap:8px; align-items:center;">
+  <span class="muted">Route from:</span>
+  <label style="display:inline-flex; gap:6px; align-items:center;">
+    <input type="radio" name="route-from" id="rf-myloc" value="myloc" checked />
+    <span>My location</span>
+  </label>
+  <label style="display:inline-flex; gap:6px; align-items:center;">
+    <input type="radio" name="route-from" id="rf-selected" value="selected" />
+    <span>Selected point</span>
+  </label>
+</label>
+
+
           <button id="btn-route" class="btn primary" title="Route: my location → selected point">Get walking route</button>
           <span id="route-summary" class="pill" style="display:none;"></span>
           <span class="muted" style="margin-left:auto;">Tap the map or use search to pick a spot.</span>
