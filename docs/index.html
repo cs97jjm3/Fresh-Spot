@@ -150,10 +150,10 @@
 
 <label class="pill" style="display:flex; gap:8px; align-items:center;">
   <span class="muted">Route from:</span>
-  <label style="display:inline-flex; gap:6px; align-items:center;">
-    <input type="radio" name="route-from" id="rf-myloc" value="myloc" checked />
-    <span>My location</span>
-  </label>
+<label class="pill" id="home-only-wrap" style="display:none; gap:6px; align-items:center;">
+  <input type="checkbox" id="home-only" checked />
+  <span>Only stops going to Home terminus</span>
+</label>
   <label style="display:inline-flex; gap:6px; align-items:center;">
     <input type="radio" name="route-from" id="rf-selected" value="selected" />
     <span>Selected point</span>
