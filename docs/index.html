@@ -25,6 +25,9 @@
       --line: #e5e7eb;      /* borders */
       --muted: #6b7280;     /* text-muted */
       --brand: #0ea5e9;     /* sky-500 */
+      --bus: #0ea5e9;
+      --train: #10b981;
+      --dest: #ef4444;
     }
     * { box-sizing: border-box; }
     body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color: #111; }
@@ -35,13 +38,11 @@
     header .title { font-weight: 700; }
     header .tag { font-size: 12px; color: #c7d2fe; opacity: .9; }
     .container { display: grid; grid-template-rows: auto 1fr auto; height: 100vh; }
-    .main {
-      display: grid; grid-template-columns: 1.7fr 1fr; min-height: 0; /* allow map to shrink */
-    }
+    .main { display: grid; grid-template-columns: 1.7fr 1fr; min-height: 0; }
     @media (max-width: 900px) { .main { grid-template-columns: 1fr; } }
-    #map { height: calc(100vh - 140px); width: 100%; }
+    #map { height: calc(100vh - 160px); width: 100%; }
     @media (max-width: 900px) { #map { height: 50vh; } }
-    aside { border-left: 1px solid var(--line); padding: 12px; min-height: 0; }
+    aside { border-left: 1px solid var(--line); padding: 12px; min-height: 0; overflow: auto; }
     @media (max-width: 900px) { aside { border-left: none; border-top: 1px solid var(--line); } }
     .row { display: flex; gap: 8px; align-items: center; }
     .search { position: relative; width: 100%; max-width: 520px; margin-left: auto; }
@@ -54,24 +55,26 @@
       border-radius: 10px; margin-top: 6px; overflow: hidden; z-index: 1000;
       box-shadow: 0 6px 24px rgba(0,0,0,.08);
     }
-    .dropdown button {
-      display: block; width: 100%; text-align: left; padding: 10px 12px; border: 0; background: #fff;
-      cursor: pointer;
-    }
+    .dropdown button { display: block; width: 100%; text-align: left; padding: 10px 12px; border: 0; background: #fff; cursor: pointer; }
     .dropdown button:hover { background: #f9fafb; }
     .card { border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
     .muted { color: var(--muted); font-size: 14px; }
     .error { color: #b91c1c; }
     .pill { display: inline-block; padding: 3px 8px; border-radius: 999px; background: #f1f5f9; font-size: 12px; }
-    .btn {
-      border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; background: #fff; cursor: pointer;
-    }
+    .btn { border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; background: #fff; cursor: pointer; }
     .btn.primary { background: var(--brand); color: white; border-color: var(--brand); }
     footer { border-top: 1px solid var(--line); padding: 10px 12px; font-size: 12px; color: var(--muted); }
     .stack { display: grid; gap: 10px; }
     .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
     @media (max-width: 420px) { .grid2 { grid-template-columns: 1fr; } }
     .kv { display:flex; justify-content: space-between; gap: 10px; font-size: 14px; }
+    .list { display: grid; gap: 8px; }
+    .stop-item { display:flex; justify-content: space-between; gap:8px; align-items: center; }
+    .stop-name { font-weight: 600; }
+    .stop-kind { font-size: 12px; padding: 2px 6px; border-radius: 999px; }
+    .kind-bus { background: rgba(14,165,233,.1); color: #0369a1; }
+    .kind-train { background: rgba(16,185,129,.12); color: #065f46; }
+    .dir-step { font-size: 14px; }
   </style>
 </head>
 <body>
@@ -88,22 +91,39 @@
     <div class="main">
       <div>
         <div id="map"></div>
-        <div style="padding:12px; border-top:1px solid var(--line); display:flex; gap:8px; flex-wrap: wrap;">
+        <div style="padding:12px; border-top:1px solid var(--line); display:flex; gap:8px; flex-wrap: wrap; align-items:center;">
           <button id="btn-my-location" class="btn">Use my location</button>
           <button id="btn-route" class="btn primary" title="Route: my location → selected point">Get walking route</button>
           <span id="route-summary" class="pill" style="display:none;"></span>
+          <span class="muted" style="margin-left:auto;">Tap the map or use search to pick a spot.</span>
         </div>
       </div>
 
       <aside>
         <div class="stack">
-          <div class="muted">Tap the map or use search to pick a spot.</div>
-
           <div id="selection" class="card" style="display:none;"></div>
 
           <div id="weather" class="card" style="display:none;"></div>
 
           <div id="air" class="card" style="display:none;"></div>
+
+          <div id="stops" class="card" style="display:none;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+              <div style="font-weight:600;">Nearby stops</div>
+              <div class="muted" style="font-size:12px;">
+                Radius: <span id="stops-radius">800</span> m
+              </div>
+            </div>
+            <div id="stops-list" class="list"></div>
+          </div>
+
+          <div id="directions" class="card" style="display:none;">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+              <div style="font-weight:600;">Directions</div>
+              <button id="btn-clear-route" class="btn">Clear</button>
+            </div>
+            <div id="directions-steps" class="list" style="margin-top:8px;"></div>
+          </div>
 
           <div id="errors" class="error" style="display:none;"></div>
         </div>
@@ -111,12 +131,11 @@
     </div>
 
     <footer>
-      Map © OpenStreetMap • Routing: OSRM (fallback ORS) • Weather & Air: OpenWeatherMap
+      Map © OpenStreetMap • Stops: OSM Overpass • Routing: OSRM (fallback ORS) • Weather & Air: OpenWeatherMap
     </footer>
   </div>
 
-  <!-- Your private keys file (DO NOT COMMIT). Create this file as config.js beside index.html -->
-  <!-- Example content provided below in the instructions -->
+  <!-- Your private keys file (DO NOT COMMIT) -->
   <script src="config.js"></script>
 
   <!-- App code -->
