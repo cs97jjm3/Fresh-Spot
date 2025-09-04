@@ -132,8 +132,8 @@
     if (!rev) return "";
     const a = rev.address || {};
     const town = a.town || a.city || a.village || a.hamlet || a.suburb || a.county || "";
-    const pc = a.postcode || "";
-    return [town, pc].filter(Boolean).join(", ");
+    thePc = a.postcode || ""; // keep postcode if present
+    return [town, thePc].filter(Boolean).join(", ");
   }
   async function geocode(q) {
     const r = await fetch(`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=8&q=${encodeURIComponent(q)}`, {
@@ -288,7 +288,7 @@
           lat: n.lat || n.center?.lat,
           lon: n.lon || n.center?.lon,
           name: n.tags?.name || "Bus stop",
-          // prefer official NaPTAN/ATCO where present
+          // prefer official NaPTAN/ATCO where present (internal only)
           naptan: n.tags?.["naptan:AtcoCode"] || n.tags?.["ref:GB:Naptan"] || null
         }))
         .filter(s => s.lat && s.lon);
@@ -473,37 +473,32 @@
   function renderStopPopup(stop, isBest=false) {
     const sid = `s${String(stop.id).replace(/[^a-zA-Z0-9_-]/g, "")}`;
 
-    // Weather: always for best stop; else respect SHOW_INLINE
-    const wantWx = isBest || (CFG.METOFFICE?.SHOW_INLINE !== false);
-    const wxRow = wantWx ? `<div id="wxline-${sid}" class="muted" style="margin-top:6px;">Loading weather…</div>` : "";
+    // WEATHER: always show (best or not)
+    const wxRow = `<div id="wxline-${sid}" class="muted" style="margin-top:6px;">Loading weather…</div>`;
 
     // Live arrivals: TfL in London; BODS elsewhere (if enabled)
     let live = `<div class="muted" style="margin-top:6px;">Live arrivals not available here</div>`;
-    if (isTfLStop(stop.naptan)) {
-      live = `<div id="arrivals-${sid}" class="muted" style="margin-top:6px;">Loading arrivals…</div>`;
-    } else if (bodsEnabled() && stop.naptan) {
+    if (isTfLStop(stop.naptan) || (bodsEnabled() && stop.naptan)) {
       live = `<div id="arrivals-${sid}" class="muted" style="margin-top:6px;">Loading arrivals…</div>`;
     }
 
-    const nap = stop.naptan ? `<div class="muted">NaPTAN ${stop.naptan}</div>` : "";
+    // Friendlier header (hide NaPTAN code)
     const hdr = isBest ? `<div class="pill" style="background:#f59e0b;color:#fff;margin-bottom:6px;">Best stop</div>` : "";
 
-    return `${hdr}<div style="font-weight:700">${stop.name}</div>${nap}${wxRow}${live}`;
+    return `${hdr}<div style="font-weight:700">${stop.name}</div>${wxRow}${live}`;
   }
 
   async function enhanceStopPopup(stop) {
     const sid = `s${String(stop.id).replace(/[^a-zA-Z0-9_-]/g, "")}`;
 
-    // Weather (best stop forced on)
-    if (stop.id === bestStopId || CFG.METOFFICE?.SHOW_INLINE !== false) {
-      try {
-        const line = await weatherLine(stop.lat, stop.lon);
-        const el = document.getElementById(`wxline-${sid}`);
-        if (el) el.textContent = line;
-      } catch {
-        const el = document.getElementById(`wxline-${sid}`);
-        if (el) el.textContent = "Weather unavailable";
-      }
+    // Weather (always)
+    try {
+      const line = await weatherLine(stop.lat, stop.lon);
+      const el = document.getElementById(`wxline-${sid}`);
+      if (el) el.textContent = line === "—" ? "Weather unavailable" : line;
+    } catch {
+      const el = document.getElementById(`wxline-${sid}`);
+      if (el) el.textContent = "Weather unavailable";
     }
 
     // Live arrivals
@@ -628,7 +623,7 @@
       for (const s of subset) {
         const d1 = await routeDurationSec({lat:origin.lat,lon:origin.lon},{lat:s.lat,lon:s.lon});
         const d2 = await routeDurationSec({lat:s.lat,lon:s.lon},{lat:home.lat,lon:home.lon});
-        s.walkToStopSec = d1; s.walkToHomeSec = d2; s.totalSec = d1 + d2;
+        s.walkToStopSec = d1; s.walkFromStopSec = d2; s.totalSec = d1 + d2;
         if (!best || s.totalSec < best.totalSec) best = s;
       }
       bestStopId = best?.id || null;
@@ -647,10 +642,11 @@
             <div class="stop-item" data-stop-id="${s.id}">
               <div class="stop-left">
                 <div class="stop-name">${s.name}</div>
-                ${s.naptan ? `<span class="pill">NaPTAN ${s.naptan}</span>` : ""}
                 ${s.id===bestStopId ? `<span class="pill" style="background:#f59e0b;color:#fff;">Best</span>` : ""}
               </div>
-              <div class="muted">Walk: ${fmtMin(s.walkToStopSec)} + ${fmtMin(s.walkToHomeSec)} = <b>${fmtMin(s.totalSec)}</b></div>
+              <div class="muted">
+                To stop: ${fmtMin(s.walkToStopSec)} · From stop: ${fmtMin(s.walkFromStopSec)} = <b>${fmtMin(s.totalSec)}</b>
+              </div>
             </div>
           `).join("");
 
