@@ -224,16 +224,18 @@ function debounce(fn, ms = 250) {
   return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
 }
 
-async function geocode(q) {
-  const url = `${NOMINATIM}?format=jsonv2&q=${encodeURIComponent(q)}&addressdetails=0&limit=5&countrycodes=gb`;
+async function reverseGeocode(lat, lon) {
+  const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}&zoom=16&addressdetails=1`;
   const res = await fetch(url, { headers: { "Accept-Language": "en-GB" } });
-  if (!res.ok) throw new Error("Geocoding failed");
-  const data = await res.json();
-  return data.map((r) => ({
-    label: r.display_name,
-    lat: parseFloat(r.lat),
-    lon: parseFloat(r.lon),
-  }));
+  if (!res.ok) throw new Error("Reverse geocode failed");
+  return res.json();
+}
+
+function shortTownPostcode(addr) {
+  // Prefer town/city/village/hamlet + postcode
+  const town = addr.town || addr.city || addr.village || addr.hamlet || addr.suburb || addr.county || "Home";
+  const pc = addr.postcode || "";
+  return pc ? `${town}, ${pc}` : town;
 }
 
 function showDropdown(el, items, onPick) {
