@@ -480,6 +480,7 @@ function wireButtons(){
 }
 
 // ---- MAIN ----
+// ---- MAIN ----
 async function main(){
   loadHome();
   initMap(home);
@@ -490,7 +491,7 @@ async function main(){
   await refreshSelection();
   await listNearbyStops();
 
-  // Try auto locate silently (doesn’t error if blocked)
+  // Try auto locate silently (doesn't error if blocked)
   try {
     const pos = await new Promise((res, rej)=>{
       if (!navigator.geolocation) return rej(new Error("No geolocation"));
@@ -502,11 +503,17 @@ async function main(){
     });
     currentSelection = pos;
     map.setView([pos.lat, pos.lon], 15);
-    if (!userMarker) userMarker = L.marker([pos.lat, pos.lon], { title:'You' }).addTo(map).bindPopup('You are here');
-    else userMarker.setLatLng([pos.lat, pos.lon]);
+    if (!userMarker) {
+      userMarker = L.marker([pos.lat, pos.lon], { title:'You' })
+        .addTo(map).bindPopup('You are here');
+    } else {
+      userMarker.setLatLng([pos.lat, pos.lon]);
+    }
     await refreshSelection();
     await listNearbyStops();
-  } catch(_){ /* ignore */ }
+  } catch(_){
+    // ignore if user blocks geolocation
+  }
 
   wireButtons();
   wireSearchBoxes();
@@ -514,4 +521,3 @@ async function main(){
 
 // ---- Start up ----
 document.addEventListener('DOMContentLoaded', main);
-}
