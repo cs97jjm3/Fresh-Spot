@@ -21,7 +21,6 @@ const elStopsRadius = document.getElementById("stops-radius");
 const elDirections = document.getElementById("directions");
 const elDirSteps = document.getElementById("directions-steps");
 const elErrors = document.getElementById("errors");
-const elBtnMyLoc = document.getElementById("btn-my-location");
 const elBtnRoute = document.getElementById("btn-route");
 const elBtnRouteHome = document.getElementById("btn-route-home");
 const elBtnClearRoute = document.getElementById("btn-clear-route");
@@ -380,43 +379,87 @@ out body 20;
   return [];
 }
 
-// Robust: stops whose routes also serve Home area (fallback: name heuristic)
-// Keep only stops where any served route's destination/name mentions a *Home-terminus*.
+// NEW: find candidate "terminus" names within ~1 mile of Home
+async function fetchHomeTerminusCandidates(home, radiusMeters = 1609) {
+  const qStations = `
+[out:json][timeout:25];
+(
+  node(around:${radiusMeters},${home.lat},${home.lon})["amenity"="bus_station"];
+  node(around:${radiusMeters},${home.lat},${home.lon})["public_transport"="station"]["bus"="yes"];
+);
+out body 10;
+`.trim();
+
+  const tryFetch = async (q) => {
+    for (const url of OVERPASS_URLS) {
+      try {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({ data: q })
+        });
+        if (!res.ok) continue;
+        return await res.json();
+      } catch {}
+    }
+    return null;
+  };
+
+  let json = await tryFetch(qStations);
+  let stations = (json?.elements || []).filter(e => e.type === "node");
+
+  if (stations.length) {
+    const names = stations.map(s => (s.tags?.name || s.tags?.official_name || "")).filter(Boolean);
+    return [...new Set(names.map(n => n.toLowerCase()))];
+  }
+
+  // Fallback: choose most-connected nearby stops as proxy "termini"
+  const homeStops = await fetchHomeAreaStops(home, Math.min(radiusMeters, 1200));
+  if (!homeStops.length) return [];
+
+  const scored = [];
+  for (const node of homeStops.slice(0, 20)) {
+    try {
+      const rels = await fetchStopRoutes(node.id);
+      const name = node.tags?.name || "";
+      scored.push({ id: node.id, name, routes: rels.length });
+    } catch {}
+  }
+  scored.sort((a,b) => b.routes - a.routes);
+  const top = scored.slice(0, 3).map(s => s.name).filter(Boolean);
+  return [...new Set(top.map(n => n.toLowerCase()))];
+}
+
+// UPDATED: keep only stops whose routes mention a Home "terminus" within ~1 mile
 async function getStopsTowardHomeSet(stopsNearYou, home) {
-  // 1) Build a set of "terminus" name tokens near Home (within ~1 mile)
   let terminusNames = [];
   try {
     terminusNames = await fetchHomeTerminusCandidates(home, 1609);
   } catch { terminusNames = []; }
 
-  // If we can’t find any named terminus, fall back to the old name heuristic
   if (!terminusNames.length) {
     return await nameHeuristicHomeSet(stopsNearYou, home);
   }
 
-  // Normalize tokens (words >= 3 chars) from the terminus names
   const tokens = [...new Set(
     terminusNames.flatMap(n => n.split(/[\s,]+/)).filter(w => w.length >= 3)
   )];
 
-  // 2) For each candidate stop near the user, check its routes' tags
   const hitIds = new Set();
   for (const s of stopsNearYou) {
     try {
-      const rels = await fetchStopRoutes(s.id); // you already have this helper
+      const rels = await fetchStopRoutes(s.id);
       const hit = rels.some(r => {
         const t = r.tags || {};
-        // Text we’ll scan: destination-ish fields and the route name
         const hay = [
           t.destination, t.to, t.via, t.name, t["name:en"], t.ref
         ].filter(Boolean).join(" • ").toLowerCase();
         return tokens.some(tok => hay.includes(tok));
       });
       if (hit) hitIds.add(s.id);
-    } catch { /* ignore individual failures */ }
+    } catch {}
   }
 
-  // 3) If none matched (data sparse), fall back to the old name heuristic
   if (!hitIds.size) {
     return await nameHeuristicHomeSet(stopsNearYou, home);
   }
@@ -443,64 +486,8 @@ async function nameHeuristicHomeSet(stops, home) {
   }
   return out;
 }
-// Find candidate "main termini" near Home (≈ 1 mile / 1609 m).
-// 1) Prefer real bus stations (amenity=bus_station, or public_transport=station bus=yes)
-// 2) Fallback: the most "connected" home-area stops by route count.
-async function fetchHomeTerminusCandidates(home, radiusMeters = 1609) {
-  // Try to find named bus stations first (cheap & strong signal)
-  const qStations = `
-[out:json][timeout:25];
-(
-  node(around:${radiusMeters},${home.lat},${home.lon})["amenity"="bus_station"];
-  node(around:${radiusMeters},${home.lat},${home.lon})["public_transport"="station"]["bus"="yes"];
-);
-out body 10;
-`.trim();
 
-  // try Overpass mirrors (same rotation you already have)
-  const tryFetch = async (q) => {
-    for (const url of OVERPASS_URLS) {
-      try {
-        const res = await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          body: new URLSearchParams({ data: q })
-        });
-        if (!res.ok) continue;
-        return await res.json();
-      } catch {}
-    }
-    return null;
-  };
-
-  let json = await tryFetch(qStations);
-  let stations = (json?.elements || []).filter(e => e.type === "node");
-
-  // If we found stations, return their names as the termini set
-  if (stations.length) {
-    const names = stations.map(s => (s.tags?.name || s.tags?.official_name || "")).filter(Boolean);
-    return [...new Set(names.map(n => n.toLowerCase()))];
-  }
-
-  // Fallback: pick the home-area stops with most routes and treat their names as "termini"
-  const homeStops = await fetchHomeAreaStops(home, Math.min(radiusMeters, 1200)); // reuse helper you already have
-  if (!homeStops.length) return [];
-
-  // Score by number of route relations
-  const scored = [];
-  for (const node of homeStops.slice(0, 20)) {
-    try {
-      const rels = await fetchStopRoutes(node.id);
-      const name = node.tags?.name || "";
-      scored.push({ id: node.id, name, routes: rels.length });
-    } catch { /* ignore */ }
-  }
-  scored.sort((a,b) => b.routes - a.routes);
-  const top = scored.slice(0, 3).map(s => s.name).filter(Boolean);
-  return [...new Set(top.map(n => n.toLowerCase()))];
-}
-
-// ======= Stops (filter to Home, routes, live times) =======
+// ======= Stops (filter to Home terminus, routes, live times) =======
 async function loadStops(lat,lng,radius=800){
   elStopsRadius.textContent = radius;
   const q = `
@@ -551,7 +538,7 @@ out skel qt;
   if (!stops.length) {
     setHTML(elStopsList, `
       <div class="muted" style="padding:8px;">
-        No nearby stops found that clearly reach your Home area.
+        No nearby stops found that clearly go to a Home terminus (~1 mile).
         Try turning off “Only stops to Home” or zooming out.
       </div>
     `);
@@ -578,7 +565,7 @@ out skel qt;
         <div>
           <div class="stop-name">
             ${escapeHtml(s.name)}
-            ${homeSet && homeSet.has(s.id) ? `<span class="pill" style="margin-left:6px;">→ Home</span>` : ""}
+            ${homeSet && homeSet.has(s.id) ? `<span class="pill" style="margin-left:6px;">→ Home terminus</span>` : ""}
           </div>
           <div class="muted" style="font-size:12px;">
             ${s.kind === "bus" ? "Bus stop" : "Train/Tram"} • ${miles(s.dist)} mi
