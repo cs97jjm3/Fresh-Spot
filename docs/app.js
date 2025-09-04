@@ -1,4 +1,6 @@
+/* global L */
 
+(() => {
 
 // ---- Non-secret defaults (override in config.js) ----
 window.CONFIG = Object.assign({
