@@ -139,6 +139,47 @@
     });
   }
 
+  // ---------------- Home persistence ----------------
+  const HOME_KEY = "freshstop.home.v1";
+
+  function saveHome() {
+    try { localStorage.setItem(HOME_KEY, JSON.stringify(home)); } catch {}
+  }
+
+  function loadHome() {
+    try {
+      const raw = localStorage.getItem(HOME_KEY);
+      if (!raw) return null;
+      const h = JSON.parse(raw);
+      if (h && Number.isFinite(h.lat) && Number.isFinite(h.lon) && typeof h.display === "string") {
+        return h;
+      }
+    } catch {}
+    return null;
+  }
+
+  function applyHome(h) {
+    // Apply to UI without reverse geocoding
+    home = { lat: h.lat, lon: h.lon, display: h.display };
+    if (homeMarker) map.removeLayer(homeMarker);
+    homeMarker = L.marker([home.lat, home.lon], { icon: DEST_ICON })
+      .addTo(map)
+      .bindPopup(`<b>Home</b><br>${home.display}`);
+    if (elHomePill) {
+      elHomePill.textContent = `Home: ${home.display}`;
+      elHomePill.style.display = "inline-block";
+    }
+    if (elHomeInput) elHomeInput.style.display = "none";
+  }
+
+  function clearHome() {
+    home = null;
+    try { localStorage.removeItem(HOME_KEY); } catch {}
+    if (homeMarker) { map.removeLayer(homeMarker); homeMarker = null; }
+    if (elHomePill) { elHomePill.textContent = ""; elHomePill.style.display = "none"; }
+    if (elHomeInput) { elHomeInput.style.display = "block"; elHomeInput.value = ""; elHomeInput.focus(); }
+  }
+
   // Origin handling
   function setOrigin(o) {
     origin = o;
@@ -172,12 +213,19 @@
     if (homeMarker) map.removeLayer(homeMarker);
     homeMarker = L.marker([lat, lon], { icon: DEST_ICON }).addTo(map)
       .bindPopup(`<b>Home</b><br>${display}`);
+
+    saveHome(); // persist
   }
   elHomePill?.addEventListener("click", () => {
     if (!elHomeInput) return;
     elHomeInput.value = "";
     elHomeInput.style.display = "block";
     elHomeInput.focus();
+  });
+  // Optional: right-click to clear Home
+  elHomePill?.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    if (confirm("Clear Home?")) clearHome();
   });
 
   // Attach search UIs
@@ -312,9 +360,9 @@
   }
   async function tflArrivals(naptanId) {
     try {
-      const sep = tflUnifiedParams() ? "?" : "";
-      const qp  = tflUnifiedParams().replace(/^&/, "");
-      const url = `https://api.tfl.gov.uk/StopPoint/${encodeURIComponent(naptanId)}/arrivals${sep}${qp}`;
+      // Build '?app_key=...' (tflUnifiedParams returns a string starting with '&')
+      const qp = tflUnifiedParams();
+      const url = `https://api.tfl.gov.uk/StopPoint/${encodeURIComponent(naptanId)}/arrivals${qp ? '?' + qp.slice(1) : ''}`;
       const r = await fetch(url, { headers: tflApimHeaders() });
       if (!r.ok) return [];
       const j = await r.json();
@@ -560,7 +608,11 @@
   // Button
   $("#btn-best-stop")?.addEventListener("click", findBestStop);
 
-  // Try to auto-locate on boot (so the button "just works")
+  // ----- Boot: restore Home then try auto-locate so "best stop" just works -----
+  (function restoreHomeOnBoot(){
+    const saved = loadHome();
+    if (saved) applyHome(saved);
+  })();
   (async () => { await autoLocate(); })();
 
 })();
