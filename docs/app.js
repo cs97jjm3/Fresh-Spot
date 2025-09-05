@@ -348,39 +348,67 @@ function wireButtons(){
     } catch { showError('Could not get your location.'); }
   };
 
-  const btnBest = el('#btn-best-stop'), bestLabel = el('#best-label');
-  if (btnBest) btnBest.onclick = async ()=>{
-    const origin = currentSelection
-      || (userMarker ? { lat:userMarker.getLatLng().lat, lon:userMarker.getLatLng().lng } : null)
-      || home;
+const btnBest = el('#btn-best-stop'), bestLabel = el('#best-label');
+if (btnBest) btnBest.onclick = async ()=>{
+  const origin = currentSelection
+    || (userMarker ? { lat:userMarker.getLatLng().lat, lon:userMarker.getLatLng().lng } : null)
+    || home;
 
-    let stops=[];
-    try { stops = await fetchStopsAround(origin.lat, origin.lon); }
-    catch { showError('No stops found.'); return; }
+  let stops=[];
+  try { stops = await fetchStopsAround(origin.lat, origin.lon); }
+  catch { showError('No stops found.'); return; }
 
-    const pair = chooseStopsTowardsHome(origin, stops, home);
-    if (!pair) { showError('No suitable stops.'); return; }
-    const { board, alight } = pair;
+  const pair = chooseStopsTowardsHome(origin, stops, home);
+  if (!pair) { showError('No suitable stops.'); return; }
+  const { board, alight } = pair;
 
-    // Pulse marker at board
-    if (bestPulsePin) { map.removeLayer(bestPulsePin); bestPulsePin = null; }
-    bestPulsePin = L.marker([board.lat, board.lon], {
-      icon: L.divIcon({ className: '', html: '<div class="pulse-pin"></div>', iconSize: [18,18], iconAnchor: [9,9] })
-    }).addTo(map);
-    if (bestLabel) {
-      bestLabel.style.display = 'inline-block';
-      setTimeout(()=> bestLabel.style.display='none', 6000);
-    }
+  // Remove any previous highlight marker
+  if (bestPulsePin) { map.removeLayer(bestPulsePin); bestPulsePin = null; }
 
-    // Routes
-    clearRoute();
-    let w1=null, w2=null;
-    try { w1 = await getWalkRoute(origin, board); drawGeoJSON(w1.geojson, { color:'#2a9d8f' }); } catch {}
-    try { w2 = await getWalkRoute(alight, home); drawGeoJSON(w2.geojson, { color:'#e76f51' }); } catch {}
-    writeWalkSummary(w1, w2, board, alight);
+  // 🎯 Add a DISTINCTIVE pulsing marker and bind the stop popup
+  bestPulsePin = L.marker([board.lat, board.lon], {
+    icon: L.divIcon({
+      className: '',
+      // greener, slightly bigger pulsing pin
+      html: `
+        <div class="pulse-pin" style="
+          width:22px;height:22px;background:#22c55e;border:2px solid #fff;border-radius:50%;box-shadow:0 2px 10px rgba(0,0,0,.25);
+          position:relative;
+        ">
+          <div style="
+            position:absolute;left:50%;top:50%;width:22px;height:22px;transform:translate(-50%,-50%);
+            border-radius:50%;border:2px solid rgba(34,197,94,.6);animation:pulse 1.6s ease-out infinite;
+          "></div>
+        </div>
+      `,
+      iconSize: [22,22],
+      iconAnchor: [11,11]
+    })
+  })
+  .addTo(map)
+  .bindPopup(popupTemplate(board));
 
-    map.setView([board.lat, board.lon], 16);
-  };
+  // Open the popup right away and populate it (weather + arrivals)
+  bestPulsePin.openPopup();
+  // enhance the popup content (same as other stop markers)
+  bestPulsePin.on('popupopen', () => enhanceStopPopup(bestPulsePin, board));
+
+  // Label hint
+  if (bestLabel) {
+    bestLabel.style.display = 'inline-block';
+    setTimeout(()=> bestLabel.style.display='none', 6000);
+  }
+
+  // Routes (walk to board, and from alight to home)
+  clearRoute();
+  let w1=null, w2=null;
+  try { w1 = await getWalkRoute(origin, board); drawGeoJSON(w1.geojson, { color:'#2a9d8f' }); } catch {}
+  try { w2 = await getWalkRoute(alight, home); drawGeoJSON(w2.geojson, { color:'#e76f51' }); } catch {}
+  writeWalkSummary(w1, w2, board, alight);
+
+  map.setView([board.lat, board.lon], 16);
+};
+
 
   const btnClear = el('#btn-clear-route');
   if (btnClear) btnClear.onclick = ()=>{
