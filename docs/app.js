@@ -2,25 +2,28 @@
    FreshStop - app.js (browser)
    ===========================
 
-   Hooks to your HTML controls:
-   - Search + Set Home (input hides after first set; pill shows; click pill to edit)
-   - Use my location
-   - Nearby stops (with inline weather + arrivals via proxy)
-   - Best stop to get home? (pulsing marker + OSRM walking legs + directions)
-   - Clear
+   - Start at browser location (fallback: saved Home → London)
+   - Only "Set Home" search (autocomplete)
+   - Nearby stops (Overpass) with retry + timeout + mirrors
    - Weather: Open-Meteo (no key)
    - Arrivals: BODS via Cloudflare Worker (CONFIG.PROXY_BASE)
+   - "Best stop to get home?" + pulsing marker + OSRM walking legs
 */
 
 // ---- Config defaults (override in config.js) ----
 window.CONFIG = Object.assign({
-  HOME: { name: "Home", lat: 52.6755, lon: 0.1361 },
-  OVERPASS_URL: "https://overpass-api.de/api/interpreter",
+  HOME: { name: "Home", lat: 51.5074, lon: -0.1278 }, // Central London fallback
+  OVERPASS_MIRRORS: [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.openstreetmap.ru/api/interpreter"
+  ],
   OSRM_URL: "https://router.project-osrm.org",
-  PROXY_BASE: null,            // set in config.js
+  PROXY_BASE: null, // set in config.js
   SEARCH_RADIUS_M: 800,
   MAX_STOPS: 50,
-  WALK_SPEED_MPS: 1.3
+  WALK_SPEED_MPS: 1.3,
+  OVERPASS_TIMEOUT_MS: 9000
 }, window.CONFIG || {});
 
 // ---- Helpers ----
@@ -77,11 +80,8 @@ async function getWeather(lat, lon){
   const j=await r.json();
   const W={
     0:{label:"Clear",icon:"☀️"},1:{label:"Mainly clear",icon:"🌤️"},2:{label:"Partly cloudy",icon:"⛅"},3:{label:"Overcast",icon:"☁️"},
-    45:{label:"Fog",icon:"🌫️"},48:{label:"Rime fog",icon:"🌫️"},
-    51:{label:"Drizzle light",icon:"🌦️"},53:{label:"Drizzle",icon:"🌦️"},55:{label:"Drizzle heavy",icon:"🌧️"},
     61:{label:"Rain light",icon:"🌦️"},63:{label:"Rain",icon:"🌧️"},65:{label:"Rain heavy",icon:"🌧️"},
-    80:{label:"Showers light",icon:"🌦️"},81:{label:"Showers",icon:"🌧️"},82:{label:"Showers heavy",icon:"🌧️"},
-    95:{label:"Thunderstorm",icon:"⛈️"}
+    80:{label:"Showers",icon:"🌦️"},95:{label:"Thunderstorm",icon:"⛈️"}
   };
   const now=j.current_weather, idx=j.hourly.time.indexOf(now.time);
   const next3=[]; for(let k=1;k<=3;k++){const i=idx+k; if(i<j.hourly.time.length){const code=j.hourly.weathercode[i];
@@ -91,26 +91,44 @@ async function getWeather(lat, lon){
 }
 async function renderWeather(container, lat, lon){
   try{
-    const w = await getWeather(lat, lon);
-    container.innerHTML = `
-      <div class="stop-wx"><span>${w.now.icon}</span>
-        <span><strong>${w.now.temp}°C</strong> • ${w.now.label}</span>
-      </div>
-      <div class="muted" style="margin-top:2px;font-size:12px">
-        Next 3h: ${w.next3.map(h=>`${new Date(h.time).toLocaleTimeString([], {hour:'2-digit'})} ${Math.round(h.temp)}°${h.pop!=null?` ${h.pop}%`:''}`).join(' · ')}
-      </div>`;
+    const w=await getWeather(lat, lon);
+    container.innerHTML = `<div class="stop-wx"><span>${w.now.icon}</span> <span><strong>${w.now.temp}°C</strong> • ${w.now.label}</span></div>`;
   }catch{ container.textContent="Weather unavailable."; }
 }
 
-// ---- Overpass (nearby bus stops) ----
+// ---- Overpass (stops) with retries ----
+async function fetchWithTimeout(url, opts={}, timeoutMs=CONFIG.OVERPASS_TIMEOUT_MS){
+  const ctrl=new AbortController(); const t=setTimeout(()=>ctrl.abort(), timeoutMs);
+  try{ return await fetch(url, { ...opts, signal: ctrl.signal }); }
+  finally{ clearTimeout(t); }
+}
 async function fetchStopsAround(lat, lon, radiusM=CONFIG.SEARCH_RADIUS_M){
   const q=`[out:json][timeout:25];
     (node(around:${radiusM},${lat},${lon})["highway"="bus_stop"];
      node(around:${radiusM},${lat},${lon})["public_transport"="platform"]["bus"="yes"];);
     out body ${Math.min(CONFIG.MAX_STOPS,200)};`;
-  const r=await fetch(CONFIG.OVERPASS_URL,{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded;charset=UTF-8"},body:"data="+encodeURIComponent(q)});
-  if(!r.ok) throw new Error(`Overpass ${r.status}`); const j=await r.json();
-  return (j.elements||[]).map(n=>({id:n.id,name:n.tags?.name||"Bus stop",lat:n.lat,lon:n.lon,ref:n.tags?.ref||n.tags?.naptan||n.tags?.naptan_code||null}));
+
+  const body="data="+encodeURIComponent(q);
+  const mirrors = CONFIG.OVERPASS_MIRRORS;
+  let lastErr=null, json=null;
+
+  for (const base of mirrors) {
+    try{
+      const r = await fetchWithTimeout(base, {
+        method:"POST",
+        headers:{"Content-Type":"application/x-www-form-urlencoded;charset=UTF-8"},
+        body
+      });
+      if (!r.ok) { lastErr = new Error(`Overpass ${r.status} at ${base}`); continue; }
+      json = await r.json();
+      break;
+    }catch(e){
+      lastErr = e;
+      // try next mirror
+    }
+  }
+  if (!json) throw lastErr || new Error("Overpass failed");
+  return (json.elements||[]).map(n=>({id:n.id,name:n.tags?.name||"Bus stop",lat:n.lat,lon:n.lon,ref:n.tags?.ref||n.tags?.naptan||n.tags?.naptan_code||null}));
 }
 
 // ---- Best stops ----
@@ -139,7 +157,6 @@ function writeWalkSummary(w1, w2, board, alight){
   if(w1) steps.push(`<div class="dir-step">Walk to stop: ${fmtMins(w1.duration_s/60)}</div>`);
   if(alight) steps.push(`<div class="dir-step"><strong>Alight at:</strong> ${alight.name}</div>`);
   if(w2) steps.push(`<div class="dir-step">Walk home: ${fmtMins(w2.duration_s/60)}</div>`);
-  steps.push(`<div class="muted" style="font-size:12px;">Note: bus travel time not included.</div>`);
   writeDirections(steps.join(''));
 }
 
@@ -158,20 +175,27 @@ function normalizeArrivals(arr){
 async function bodsArrivalsViaProxy(bbox){
   if(!CONFIG.PROXY_BASE) throw new Error("NO_PROXY");
   const url=`${CONFIG.PROXY_BASE}/bods?bbox=${encodeURIComponent(bbox)}`;
-  const r=await fetch(url,{cache:"no-store"}); if(!r.ok) throw new Error(`BODS ${r.status}`);
+  const r=await fetch(url,{cache:"no-store"});
+  if(!r.ok) throw new Error(`BODS ${r.status}`);
   const ct=(r.headers.get("content-type")||"").toLowerCase();
-  if(ct.includes("json")){ const j=await r.json(); const items=Array.isArray(j?.results)?j.results:Array.isArray(j)?j:[]; return normalizeArrivals(items); }
+  if(ct.includes("json")) {
+    const j=await r.json();
+    const items=Array.isArray(j?.results)?j.results:Array.isArray(j)?j:[];
+    return normalizeArrivals(items);
+  }
   const t=await r.text(); return normalizeArrivals(parseNdjson(t));
 }
 async function safeArrivalsHTML(center){
   try{
-    const dLat=0.005,dLon=0.005;
-    const bbox=`${center.lat-dLat},${center.lat+dLat},${center.lon-dLon},${center.lon+dLon}`;
+    const d=0.005;
+    const bbox=`${center.lat-d},${center.lat+d},${center.lon-d},${center.lon+d}`;
     const items=await bodsArrivalsViaProxy(bbox);
     if(!items.length) return `<em>No arrivals found right now.</em>`;
     return `<ul class="arrivals">${items.slice(0,6).map(x=>`<li><strong>${x.line}</strong> → ${x.destination} • ${x.eta}</li>`).join('')}</ul>`;
   }catch(e){
-    if(String(e.message).includes("NO_PROXY")) return `<em>Live arrivals require a proxy. Add <code>CONFIG.PROXY_BASE</code> to enable.</em>`;
+    if(String(e.message).includes("NO_PROXY")) {
+      return `<em>Live arrivals require a proxy. Add <code>CONFIG.PROXY_BASE</code> to enable.</em>`;
+    }
     return `<em>Arrivals temporarily unavailable.</em>`;
   }
 }
@@ -198,24 +222,16 @@ async function refreshSelection(){
   if(!currentSelection){ card.style.display='none'; card.innerHTML=''; return; }
   const {lat,lon,label}=currentSelection;
   card.style.display='block';
-  card.innerHTML = `
-    <div style="display:flex;justify-content:space-between;align-items:center;">
-      <div>
-        <div style="font-weight:600">${label||'Selected point'}</div>
-        <div class="muted" style="font-size:12px">${lat.toFixed(5)}, ${lon.toFixed(5)}</div>
-      </div>
-      <button class="btn" id="sel-center">Center map</button>
-    </div>`;
-  el('#sel-center').onclick=()=>map.setView([lat,lon], Math.max(map.getZoom(),15));
+  card.innerHTML=`<div><strong>${label||'Point'}</strong><br><span class="muted" style="font-size:12px">${lat.toFixed(5)}, ${lon.toFixed(5)}</span></div>`;
 }
-
 async function listNearbyStops(){
   const card=el('#stops'); const listEl=el('#stops-list'); const radiusEl=el('#stops-radius');
   if(!card || !listEl) return;
   const center=currentSelection || {lat:home.lat, lon:home.lon};
   card.style.display='block'; if(radiusEl) radiusEl.textContent=String(CONFIG.SEARCH_RADIUS_M);
   let stops=[];
-  try{ stops=await fetchStopsAround(center.lat, center.lon); }catch{ showError("Couldn’t load stops."); }
+  try{ stops=await fetchStopsAround(center.lat, center.lon); }
+  catch(e){ showError("Couldn’t load stops (network busy). Try again in a moment."); }
   stopsLayer.clearLayers(); listEl.innerHTML='';
   for(const s of stops){
     const m=L.marker([s.lat,s.lon],{title:s.name}).addTo(stopsLayer).bindPopup(popupTemplate(s));
@@ -236,15 +252,15 @@ async function listNearbyStops(){
   return stops;
 }
 
-// ---- Search + Set Home ----
+// ---- Only: Set Home search (keep pill toggle) ----
 async function geocode(text){
   const url=`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(text)}&addressdetails=1&limit=5`;
   const r=await fetch(url,{headers:{'Accept':'application/json'}}); if(!r.ok) throw new Error('Search failed');
   const j=await r.json(); return j.map(x=>({lat:+x.lat, lon:+x.lon, label:x.display_name}));
 }
-function wireSearchBoxes(){
-  const search=el('#search'), drop=el('#results');
+function wireHomeSearch(){
   const homeInput=el('#home-input'), homeDrop=el('#home-results');
+  if(!homeInput || !homeDrop) return;
 
   const renderDrop=(root, items, onPick)=>{
     if(!items.length){ root.style.display='none'; root.innerHTML=''; return; }
@@ -255,36 +271,18 @@ function wireSearchBoxes(){
     });
   };
 
-  if(search && drop){
-    search.addEventListener('input', debounce(async ()=>{
-      const q=search.value.trim();
-      if(q.length<2){ drop.style.display='none'; return; }
-      try{
-        const res=await geocode(q);
-        renderDrop(drop, res, async pick=>{
-          drop.style.display='none';
-          currentSelection={lat:pick.lat, lon:pick.lon, label:pick.label};
-          map.setView([pick.lat, pick.lon], 15);
-          await refreshSelection(); await listNearbyStops();
-        });
-      }catch{ showError('Search failed.'); }
-    }, 350));
-  }
-
-  if(homeInput && homeDrop){
-    homeInput.addEventListener('input', debounce(async ()=>{
-      const q=homeInput.value.trim();
-      if(q.length<2){ homeDrop.style.display='none'; return; }
-      try{
-        const res=await geocode(q);
-        renderDrop(homeDrop, res, async pick=>{
-          homeDrop.style.display='none';
-          setHome({ name: pick.label, lat: pick.lat, lon: pick.lon });
-          await listNearbyStops();
-        });
-      }catch{ showError('Home search failed.'); }
-    }, 350));
-  }
+  homeInput.addEventListener('input', debounce(async ()=>{
+    const q=homeInput.value.trim();
+    if(q.length<2){ homeDrop.style.display='none'; return; }
+    try{
+      const res=await geocode(q);
+      renderDrop(homeDrop, res, async pick=>{
+        homeDrop.style.display='none';
+        setHome({ name: pick.label, lat: pick.lat, lon: pick.lon });
+        await listNearbyStops();
+      });
+    }catch{ showError('Home search failed.'); }
+  }, 350));
 }
 
 // ---- Home persistence + pill (with input toggle) ----
@@ -340,14 +338,7 @@ function wireButtons(){
   const btnLoc = el('#btn-my-location');
   if (btnLoc) btnLoc.onclick = async ()=>{
     try {
-      const pos = await new Promise((res, rej)=>{
-        if (!navigator.geolocation) return rej(new Error('No geolocation'));
-        navigator.geolocation.getCurrentPosition(
-          p=>res({lat:p.coords.latitude, lon:p.coords.longitude}),
-          e=>rej(e),
-          { enableHighAccuracy:true, timeout:8000, maximumAge:10000 }
-        );
-      });
+      const pos = await getBrowserLocation();
       currentSelection = pos;
       map.setView([pos.lat, pos.lon], 15);
       if (!userMarker) userMarker = L.marker([pos.lat, pos.lon], { title:'You' }).addTo(map).bindPopup('You are here');
@@ -399,41 +390,40 @@ function wireButtons(){
   };
 }
 
+// ---- Browser geolocation helper ----
+async function getBrowserLocation(){
+  return new Promise((res,rej)=>{
+    if(!navigator.geolocation) return rej(new Error("No geolocation"));
+    navigator.geolocation.getCurrentPosition(
+      p=>res({lat:p.coords.latitude,lon:p.coords.longitude}),
+      err=>rej(err),
+      {enableHighAccuracy:true,timeout:8000,maximumAge:10000}
+    );
+  });
+}
+
 // ---- MAIN ----
 async function main(){
   loadHome();
-  initMap(home);
+
+  // Prefer browser location at startup
+  let center;
+  try { center = await getBrowserLocation(); }
+  catch { center = (home && Number.isFinite(home.lat)) ? home : CONFIG.HOME; }
+
+  initMap(center);
   updateHomeUI();
 
-  // Put Home into selection initially
-  currentSelection = { lat: home.lat, lon: home.lon, label: home.name };
+  currentSelection = { lat:center.lat, lon:center.lon, label:(center===home)?home.name:'My location' };
+  if(center && currentSelection.label==='My location'){
+    userMarker=L.marker([center.lat,center.lon]).addTo(map).bindPopup('You are here');
+  }
+
   await refreshSelection();
   await listNearbyStops();
 
-  // Try geolocate silently
-  try {
-    const pos = await new Promise((res, rej)=>{
-      if (!navigator.geolocation) return rej(new Error("No geolocation"));
-      navigator.geolocation.getCurrentPosition(
-        p=>res({ lat:p.coords.latitude, lon:p.coords.longitude }),
-        e=>rej(e),
-        { enableHighAccuracy:true, timeout:5000, maximumAge:10000 }
-      );
-    });
-    currentSelection = pos;
-    map.setView([pos.lat, pos.lon], 15);
-    if (!userMarker) {
-      userMarker = L.marker([pos.lat, pos.lon], { title:'You' })
-        .addTo(map).bindPopup('You are here');
-    } else {
-      userMarker.setLatLng([pos.lat, pos.lon]);
-    }
-    await refreshSelection();
-    await listNearbyStops();
-  } catch { /* ignore if blocked */ }
-
   wireButtons();
-  wireSearchBoxes();
+  wireHomeSearch();
 }
 
 // ---- Start ----
