@@ -227,16 +227,59 @@ function chooseStopsTowardsHome(origin, stops, home){
                      .sort((a,b)=>a.score-b.score)[0].s;
   return board;
 }
+// Broader stop search: includes bus_stop/platform + amenity=bus_station (nodes)
+async function fetchStopsAroundExtended(lat, lon, radiusM = CONFIG.SEARCH_RADIUS_M) {
+  const q = `[out:json][timeout:25];
+    (
+      node(around:${radiusM},${lat},${lon})["highway"="bus_stop"];
+      node(around:${radiusM},${lat},${lon})["public_transport"="platform"]["bus"="yes"];
+      node(around:${radiusM},${lat},${lon})["amenity"="bus_station"];
+    );
+    out body ${Math.min(CONFIG.MAX_STOPS, 300)};`;
+  const body = "data=" + encodeURIComponent(q);
+
+  const mirrors = CONFIG.OVERPASS_MIRRORS || ["https://overpass-api.de/api/interpreter"];
+  let json = null, lastErr = null;
+
+  for (const base of mirrors) {
+    try {
+      const r = await fetch(base, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
+        body
+      });
+      if (!r.ok) { lastErr = new Error(`Overpass ${r.status}`); continue; }
+      json = await r.json(); break;
+    } catch (e) { lastErr = e; }
+  }
+  if (!json) throw lastErr || new Error("Overpass failed");
+
+  return (json.elements || []).map(n => ({
+    id: n.id,
+    name: n.tags?.name || (n.tags?.amenity === 'bus_station' ? 'Bus Station' : 'Bus stop'),
+    lat: n.lat, lon: n.lon,
+    ref: n.tags?.ref || n.tags?.naptan || n.tags?.naptan_code || null,
+    kind: n.tags?.amenity === 'bus_station' ? 'bus_station' : 'stop'
+  }));
+}
 
 // Find best board (near origin, aligned to home) and best alight (near home)
 async function findBestPair(origin, home) {
-  const [nearOrigin, nearHome] = await Promise.all([
-    fetchStopsAround(origin.lat, origin.lon),
-    fetchStopsAround(home.lat, home.lon)
-  ]);
+  // Near origin: classic stops
+  const nearOrigin = await fetchStopsAround(origin.lat, origin.lon);
+
+  // Near home: extended (includes bus_station)
+  let nearHome = await fetchStopsAroundExtended(home.lat, home.lon, CONFIG.SEARCH_RADIUS_M);
+
+  // If too few near home, widen once
+  if (nearHome.length < 3) {
+    nearHome = await fetchStopsAroundExtended(home.lat, home.lon, CONFIG.SEARCH_RADIUS_M * 2);
+  }
+
   if (!nearOrigin.length) throw new Error("No stops near origin");
   if (!nearHome.length)   throw new Error("No stops near home");
 
+  // --- Choose board: close + aligned toward home
   const homeBrng = bearingDeg(origin, home);
   const board = nearOrigin
     .map(s => ({
@@ -245,12 +288,25 @@ async function findBestPair(origin, home) {
     }))
     .sort((a,b)=> a.score - b.score)[0].s;
 
+  // --- Choose alight: nearest to home, with name boost for 'Horsefair', 'Bus Station', 'Interchange'
+  const nameBoost = (nm='') => {
+    const n = nm.toLowerCase();
+    if (n.includes('horsefair')) return -250; // strong nudge
+    if (n.includes('bus station') || n.includes('interchange')) return -120;
+    return 0;
+  };
+
   const alight = nearHome
-    .map(s => ({ s, d: haversineMeters(home, s) }))
-    .sort((a,b)=> a.d - b.d)[0].s;
+    .filter(s => s.id !== board.id) // don't pick the same stop as board
+    .map(s => ({
+      s,
+      score: haversineMeters(home, s) + nameBoost(s.name)
+    }))
+    .sort((a,b)=> a.score - b.score)[0]?.s || nearHome[0].s;
 
   return { board, alight };
 }
+
 
 // ---- OSRM ----
 async function getWalkRoute(from, to){
@@ -467,9 +523,9 @@ function wireButtons(){
       || home;
 
     let pair;
-    try { pair = await findBestPair(origin, home); } // uses both origin+home areas
-    catch (e) { showError(e.message || 'Could not find suitable stops.'); return; }
-    const { board, alight } = pair;
+try { pair = await findBestPair(origin, home); } // ✅ uses both origin + home areas
+catch (e) { showError(e.message || 'Could not find suitable stops.'); return; }
+const { board, alight } = pair;
 
     // Routes
     clearRoute();
