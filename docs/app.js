@@ -7,8 +7,8 @@
    - Nearby stops (Overpass) with retry + timeout + mirrors
    - Weather: Open-Meteo (no key)
    - Arrivals: BODS via Cloudflare Worker (CONFIG.PROXY_BASE)
-   - "Best stop to get home?" + pulsing marker + OSRM walking legs
-   - NEW: Best Stop card above "Nearby stops" with rich details + arrivals + focus button
+   - Best stop: green pulsing Board marker + red ring Alight marker, walking legs, Best card
+   - Skeleton placeholders instead of "Loading …" text
 */
 
 // ---- Config defaults (override in config.js) ----
@@ -49,8 +49,20 @@ function bearingDeg(from, to){
 function angleDiff(a,b){let d=Math.abs(a-b)%360;return d>180?360-d:d;}
 function showError(msg){const box=el('#errors');if(!box)return;box.style.display='block';box.textContent=msg;setTimeout(()=>{box.style.display='none';},6000);}
 
+// Skeleton placeholder
+function skel(width='100%', height=14, radius=8, style=''){
+  return `<div style="width:${width};height:${height}px;border-radius:${radius}px;background:linear-gradient(90deg,#f3f4f6 25%,#e5e7eb 37%,#f3f4f6 63%);background-size:400% 100%;animation:skel 1.2s ease infinite;${style}"></div>`;
+}
+// Inject keyframes once (idempotent)
+(function injectSkelCSS(){
+  if (document.getElementById('skel-anim')) return;
+  const s=document.createElement('style'); s.id='skel-anim';
+  s.textContent='@keyframes skel{0%{background-position:100% 0}100%{background-position:-100% 0}}';
+  document.head.appendChild(s);
+})();
+
 // ---- Map / State ----
-let map, userMarker, homeMarker, stopsLayer, routeLayer, bestPulsePin;
+let map, userMarker, homeMarker, stopsLayer, routeLayer, bestPulsePin, alightRingPin;
 let currentSelection = null; // {lat, lon, label?}
 let home = {...CONFIG.HOME};
 let lastBest = null; // { origin, board, alight, w1, w2 }
@@ -76,8 +88,8 @@ async function renderBestCard(best){
 
   const { origin, board, alight, w1, w2 } = best;
 
-  // Get arrivals HTML for the board stop
-  let arrivalsHTML = '<em>Loading live arrivals…</em>';
+  // Arrivals HTML for the board stop
+  let arrivalsHTML = skel('100%', 14, 6);
   try {
     arrivalsHTML = await safeArrivalsHTML({ lat: board.lat, lon: board.lon });
   } catch {
@@ -93,7 +105,10 @@ async function renderBestCard(best){
         <span style="display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:50%;background:#22c55e;color:#fff;">★</span>
         Best stop to get home
       </div>
-      <button class="btn" id="best-focus">Focus on map</button>
+      <div style="display:flex;gap:8px;">
+        <button class="btn" id="best-focus-board">Board on map</button>
+        <button class="btn" id="best-focus-alight">Alight on map</button>
+      </div>
     </div>
 
     <div class="grid2" style="align-items:start;">
@@ -105,7 +120,7 @@ async function renderBestCard(best){
       </div>
 
       <div>
-        <div style="font-weight:600;margin-bottom:4px;">Alight near Home: ${alight.name}</div>
+        <div style="font-weight:600;margin-bottom:4px;">Alight: ${alight.name}</div>
         <div class="muted" style="font-size:12px;margin-bottom:6px;">${fmtCoord(alight.lat, alight.lon)}</div>
         <div class="kv"><span>Walk home</span><span><strong>${walkHome}</strong></span></div>
         <div class="muted" style="font-size:12px;margin-top:6px;">(Bus travel time not included)</div>
@@ -114,22 +129,17 @@ async function renderBestCard(best){
   `;
   card.style.display = 'block';
 
-  // Wire "Focus on map" button
-  const focusBtn = el('#best-focus');
-  if (focusBtn) {
-    focusBtn.onclick = () => {
-      if (!map) return;
-      map.setView([board.lat, board.lon], 16);
-      // open popup on the special marker or create one
-      if (bestPulsePin) {
-        bestPulsePin.openPopup();
-      } else {
-        const temp = L.marker([board.lat, board.lon]).addTo(map).bindPopup(popupTemplate(board));
-        temp.openPopup();
-        temp.on('popupopen', () => enhanceStopPopup(temp, board));
-      }
-    };
-  }
+  // Focus buttons
+  const fb = el('#best-focus-board');
+  const fa = el('#best-focus-alight');
+  if (fb) fb.onclick = () => {
+    map.setView([board.lat, board.lon], 16);
+    if (bestPulsePin) bestPulsePin.openPopup();
+  };
+  if (fa) fa.onclick = () => {
+    map.setView([alight.lat, alight.lon], 16);
+    if (alightRingPin) alightRingPin.openPopup();
+  };
 }
 
 // ---- Map init ----
@@ -172,7 +182,7 @@ async function renderWeather(container, lat, lon){
   try{
     const w=await getWeather(lat, lon);
     container.innerHTML = `<div class="stop-wx"><span>${w.now.icon}</span> <span><strong>${w.now.temp}°C</strong> • ${w.now.label}</span></div>`;
-  }catch{ container.textContent="Weather unavailable."; }
+  }catch{ container.innerHTML=skel('80%',14,6); }
 }
 
 // ---- Overpass (stops) with retries ----
@@ -209,7 +219,7 @@ async function fetchStopsAround(lat, lon, radiusM=CONFIG.SEARCH_RADIUS_M){
   return (json.elements||[]).map(n=>({id:n.id,name:n.tags?.name||"Bus stop",lat:n.lat,lon:n.lon,ref:n.tags?.ref||n.tags?.naptan||n.tags?.naptan_code||null}));
 }
 
-// ---- Best stops ----
+// ---- Best stops logic ----
 function chooseStopsTowardsHome(origin, stops, home){
   if(!stops.length) return null;
   const hb=bearingDeg(origin, home);
@@ -281,11 +291,12 @@ async function safeArrivalsHTML(center){
 
 // ---- Popups ----
 function popupTemplate(stop){
+  // Skeletons in place of "Loading …"
   return `
     <div class="popup">
-      <div><strong>${stop.name}</strong>${stop.ref?` <small>(${stop.ref})</small>`:''}</div>
-      <div class="weather" data-weather-for="${stop.lat},${stop.lon}">Loading weather…</div>
-      <div class="arrivals">Loading arrivals…</div>
+      <div style="font-weight:600;margin-bottom:4px;">${stop.name}${stop.ref?` <small>(${stop.ref})</small>`:''}</div>
+      <div class="weather" data-weather-for="${stop.lat},${stop.lon}">${skel('60%',14,6,'margin:4px 0')}</div>
+      <div class="arrivals">${skel('90%',14,6)}</div>
     </div>`;
 }
 async function enhanceStopPopup(marker, stop){
@@ -321,10 +332,10 @@ async function listNearbyStops(){
       <span class="stop-kind kind-bus">Bus</span>
       ${s.ref?`<span class="pill">${s.ref}</span>`:''}
     </div>
-    <div class="stop-wx" id="wx-${s.id}">Loading…</div>`;
+    <div class="stop-wx" id="wx-${s.id}">${skel(80,14,6)}</div>`;
     listEl.appendChild(item);
     const wxEl=item.querySelector(`#wx-${s.id}`); renderWeather(wxEl, s.lat, s.lon).catch(()=>{});
-    const arrDiv=document.createElement('div'); arrDiv.className='muted'; arrDiv.style.fontSize='12px'; arrDiv.innerHTML='Loading arrivals…';
+    const arrDiv=document.createElement('div'); arrDiv.className='muted'; arrDiv.style.fontSize='12px'; arrDiv.innerHTML=skel('95%',14,6,'margin-top:4px;');
     item.appendChild(arrDiv);
     safeArrivalsHTML({lat:s.lat, lon:s.lon}).then(html=>arrDiv.innerHTML=html);
   }
@@ -359,7 +370,6 @@ function wireHomeSearch(){
         homeDrop.style.display='none';
         setHome({ name: pick.label, lat: pick.lat, lon: pick.lon });
         await listNearbyStops();
-        // If we already computed a best pair, refresh that card
         if (lastBest) await renderBestCard(lastBest);
       });
     }catch{ showError('Home search failed.'); }
@@ -399,13 +409,11 @@ function updateHomeUI(){
     pill.textContent = `🏠 ${first} (${(home?.lat ?? 0).toFixed(3)}, ${(home?.lon ?? 0).toFixed(3)})`;
     pill.style.display = 'inline-block';
     pill.onclick = () => {
-      // Switch back to input so user can change Home
       pill.style.display = 'none';
       if (input) { input.style.display = 'inline-block'; input.focus(); }
     };
   }
   if (input) {
-    // Hide input if we have a saved home
     input.style.display = (home && Number.isFinite(home.lat) && Number.isFinite(home.lon)) ? 'none' : 'inline-block';
   }
 
@@ -446,30 +454,25 @@ function wireButtons(){
     // Routes
     clearRoute();
     let w1=null, w2=null;
-    try { w1 = await getWalkRoute(origin, board); drawGeoJSON(w1.geojson, { color:'#2a9d8f' }); } catch {}
-    try { w2 = await getWalkRoute(alight, home); drawGeoJSON(w2.geojson, { color:'#e76f51' }); } catch {}
+    try { w1 = await getWalkRoute(origin, board); drawGeoJSON(w1.geojson, { color:'#22c55e' }); } catch {}
+    try { w2 = await getWalkRoute(alight, home); drawGeoJSON(w2.geojson, { color:'#ef4444' }); } catch {}
     writeWalkSummary(w1, w2, board, alight);
 
     // Save + render Best card
     lastBest = { origin, board, alight, w1, w2 };
     await renderBestCard(lastBest);
 
-    // Remove any previous highlight marker
+    // Remove previous markers
     if (bestPulsePin) { map.removeLayer(bestPulsePin); bestPulsePin = null; }
+    if (alightRingPin) { map.removeLayer(alightRingPin); alightRingPin = null; }
 
-    // DISTINCTIVE pulsing marker + popup
+    // Board: DISTINCT green pulsing marker + popup
     bestPulsePin = L.marker([board.lat, board.lon], {
       icon: L.divIcon({
         className: '',
         html: `
-          <div class="pulse-pin" style="
-            width:22px;height:22px;background:#22c55e;border:2px solid #fff;border-radius:50%;box-shadow:0 2px 10px rgba(0,0,0,.25);
-            position:relative;
-          ">
-            <div style="
-              position:absolute;left:50%;top:50%;width:22px;height:22px;transform:translate(-50%,-50%);
-              border-radius:50%;border:2px solid rgba(34,197,94,.6);animation:pulse 1.6s ease-out infinite;
-            "></div>
+          <div style="width:22px;height:22px;background:#22c55e;border:2px solid #fff;border-radius:50%;box-shadow:0 2px 10px rgba(0,0,0,.25);position:relative;">
+            <div style="position:absolute;left:50%;top:50%;width:22px;height:22px;transform:translate(-50%,-50%);border-radius:50%;border:2px solid rgba(34,197,94,.6);animation:pulse 1.6s ease-out infinite;"></div>
           </div>
         `,
         iconSize: [22,22],
@@ -481,6 +484,21 @@ function wireButtons(){
 
     bestPulsePin.openPopup();
     bestPulsePin.on('popupopen', () => enhanceStopPopup(bestPulsePin, board));
+
+    // Alight: RED RING marker + label, named in popup
+    alightRingPin = L.marker([alight.lat, alight.lon], {
+      title: `Alight: ${alight.name}`,
+      icon: L.divIcon({
+        className: '',
+        html: `
+          <div style="width:22px;height:22px;border:3px solid #ef4444;border-radius:50%;background:rgba(239,68,68,0.12);box-shadow:0 2px 10px rgba(0,0,0,.15);"></div>
+        `,
+        iconSize: [22,22],
+        iconAnchor: [11,11]
+      })
+    })
+    .addTo(map)
+    .bindPopup(`<div><strong>Alight here:</strong> ${alight.name}<br><span class="muted" style="font-size:12px">${fmtCoord(alight.lat, alight.lon)}</span></div>`);
 
     if (bestLabel) {
       bestLabel.style.display = 'inline-block';
@@ -495,6 +513,7 @@ function wireButtons(){
     clearRoute();
     writeDirections('');
     if (bestPulsePin) { map.removeLayer(bestPulsePin); bestPulsePin = null; }
+    if (alightRingPin) { map.removeLayer(alightRingPin); alightRingPin = null; }
     lastBest = null;
     renderBestCard(null);
   };
@@ -529,7 +548,7 @@ async function main(){
     userMarker=L.marker([center.lat,center.lon]).addTo(map).bindPopup('You are here');
   }
 
-  // Ensure Best card container exists (empty until you click Best)
+  // Ensure Best card container exists
   ensureBestCard();
 
   await refreshSelection();
