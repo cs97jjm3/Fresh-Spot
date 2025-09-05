@@ -6,9 +6,8 @@
    - Only "Set Home" search (autocomplete)
    - Nearby stops (Overpass) with mirrors + timeout
    - Weather: Open-Meteo (no key) + mini 3h forecast
-   - Arrivals: BODS via Cloudflare Worker (CONFIG.PROXY_BASE)
-   - Best stop: green pulsing Board + red ring Alight, walking legs, Best card
-   - Popups reliably enhanced (weather + arrivals)
+   - BEST STOP: green pulsing Board + red ring Alight, walking legs, Best card
+   - Popups/list show SERVED LINES (🚌/🚆/🚊…) from OSM route relations (no arrivals/proxy)
    - Skeleton placeholders instead of "Loading …"
 */
 
@@ -21,7 +20,6 @@ window.CONFIG = Object.assign({
     "https://overpass.openstreetmap.ru/api/interpreter"
   ],
   OSRM_URL: "https://router.project-osrm.org",
-  PROXY_BASE: null, // set in config.js
   SEARCH_RADIUS_M: 800,
   MAX_STOPS: 50,
   WALK_SPEED_MPS: 1.3,
@@ -32,7 +30,7 @@ window.CONFIG = Object.assign({
 const el  = sel => document.querySelector(sel);
 const fmtMins = mins => `${Math.round(mins)} min`;
 const toRad = d => d * Math.PI / 180;
-const toDeg = r => r * Math.PI / 180 * 180/Math.PI; // (kept simple below)
+const toDeg = r => r * 180 / Math.PI;
 function debounce(fn, wait=300){ let t; return (...a)=>{ clearTimeout(t); t=setTimeout(()=>fn(...a), wait);} }
 function haversineMeters(a, b){
   const R=6371000, dLat=toRad(b.lat-a.lat), dLon=toRad(b.lon-a.lon);
@@ -44,7 +42,7 @@ function bearingDeg(from, to){
   const φ1=toRad(from.lat), φ2=toRad(to.lat), λ1=toRad(from.lon), λ2=toRad(to.lon);
   const y=Math.sin(λ2-λ1)*Math.cos(φ2);
   const x=Math.cos(φ1)*Math.sin(φ2)-Math.sin(φ1)*Math.cos(φ2)*Math.cos(λ2-λ1);
-  return (Math.atan2(y,x)*180/Math.PI+360)%360;
+  return (toDeg(Math.atan2(y,x))+360)%360;
 }
 function angleDiff(a,b){let d=Math.abs(a-b)%360;return d>180?360-d:d;}
 function showError(msg){const box=el('#errors');if(!box)return;box.style.display='block';box.textContent=msg;setTimeout(()=>{box.style.display='none';},6000);}
@@ -139,7 +137,7 @@ async function renderMiniForecast(container, lat, lon){
   }catch{ container.innerHTML = skel('90%',14,6); }
 }
 
-// ---- Overpass (stops) with retries ----
+// ---- Overpass (with retries) ----
 async function fetchWithTimeout(url, opts={}, timeoutMs=CONFIG.OVERPASS_TIMEOUT_MS){
   const ctrl=new AbortController(); const t=setTimeout(()=>ctrl.abort(), timeoutMs);
   try{ return await fetch(url, { ...opts, signal: ctrl.signal }); }
@@ -165,15 +163,13 @@ async function fetchStopsAround(lat, lon, radiusM=CONFIG.SEARCH_RADIUS_M){
       if (!r.ok) { lastErr = new Error(`Overpass ${r.status} at ${base}`); continue; }
       json = await r.json();
       break;
-    }catch(e){
-      lastErr = e; // try next
-    }
+    }catch(e){ lastErr = e; }
   }
   if (!json) throw lastErr || new Error("Overpass failed");
   return (json.elements||[]).map(n=>({id:n.id,name:n.tags?.name||"Bus stop",lat:n.lat,lon:n.lon,ref:n.tags?.ref||n.tags?.naptan||n.tags?.naptan_code||null}));
 }
 
-// ---- Extended (adds amenity=bus_station near Home) ----
+// Extended for home area (prefer bus stations)
 async function fetchStopsAroundExtended(lat, lon, radiusM = CONFIG.SEARCH_RADIUS_M) {
   const q = `[out:json][timeout:25];
     (
@@ -207,6 +203,71 @@ async function fetchStopsAroundExtended(lat, lon, radiusM = CONFIG.SEARCH_RADIUS
     ref: n.tags?.ref || n.tags?.naptan || n.tags?.naptan_code || null,
     kind: n.tags?.amenity === 'bus_station' ? 'bus_station' : 'stop'
   }));
+}
+
+// ---- Lines for a stop (route relations) ----
+const LINES_CACHE = new Map(); // id -> [{mode,ref,name,network}]
+const MODE_ICON = m => ({
+  bus:'🚌', trolleybus:'🚎', tram:'🚊', train:'🚆',
+  light_rail:'🚈', subway:'🚇'
+}[m] || '🚌');
+
+function uniqBy(arr, key) {
+  const seen = new Set(); const out=[];
+  for (const x of arr) { const k = key(x); if (seen.has(k)) continue; seen.add(k); out.push(x); }
+  return out;
+}
+
+async function fetchStopLines(stopId) {
+  if (LINES_CACHE.has(stopId)) return LINES_CACHE.get(stopId);
+
+  const q = `[out:json][timeout:25];
+    relation(bn:${stopId})["type"="route"]["route"~"bus|trolleybus|tram|train|light_rail|subway"];
+    out tags;`;
+  const body = "data=" + encodeURIComponent(q);
+
+  let json=null, lastErr=null;
+  for (const base of CONFIG.OVERPASS_MIRRORS) {
+    try{
+      const r = await fetchWithTimeout(base, {
+        method:"POST",
+        headers:{"Content-Type":"application/x-www-form-urlencoded;charset=UTF-8"},
+        body
+      });
+      if (!r.ok) { lastErr = new Error(`Overpass ${r.status}`); continue; }
+      json = await r.json(); break;
+    }catch(e){ lastErr=e; }
+  }
+  if (!json) { console.warn('lines fetch failed', lastErr); LINES_CACHE.set(stopId, []); return []; }
+
+  const items = (json.elements||[])
+    .map(rel => {
+      const t = rel.tags || {};
+      return {
+        mode: t.route || 'bus',
+        ref: t.ref || t['ref:short'] || t.name || '',
+        name: t.name || '',
+        network: t.network || ''
+      };
+    })
+    .filter(x => x.ref || x.name);
+
+  // Dedup by (mode,ref/name)
+  const clean = uniqBy(items, x => `${x.mode}|${x.ref || x.name}`).slice(0, 16);
+  LINES_CACHE.set(stopId, clean);
+  return clean;
+}
+
+function linesBadgesHTML(lines){
+  if (!lines || !lines.length) return `<span class="muted">No routes listed</span>`;
+  return `
+    <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:4px;">
+      ${lines.slice(0,16).map(l => `
+        <span class="pill" title="${l.name || l.network || ''}">
+          ${MODE_ICON(l.mode)} ${l.ref || (l.name || '').split(' ')[0]}
+        </span>
+      `).join('')}
+    </div>`;
 }
 
 // ---- Best stops logic ----
@@ -262,65 +323,33 @@ function writeWalkSummary(w1, w2, board, alight){
   if(w1) steps.push(`<div class="dir-step">Walk to stop: ${fmtMins(w1.duration_s/60)}</div>`);
   if(alight) steps.push(`<div class="dir-step"><strong>Alight at:</strong> ${alight.name}</div>`);
   if(w2) steps.push(`<div class="dir-step">Walk home: ${fmtMins(w2.duration_s/60)}</div>`);
-  steps.push(`<div class="muted" style="font-size:12px;">Note: bus travel time not included.</div>`);
+  steps.push(`<div class="muted" style="font-size:12px;">Note: live bus times removed; this shows walking only.</div>`);
   writeDirections(steps.join(''));
-}
-
-// ---- Arrivals (BODS via Cloudflare Worker) ----
-function parseNdjson(text){
-  return text.split(/\r?\n/).map(l=>l.trim()).filter(Boolean).filter(l=>l.startsWith("{"))
-             .map(l=>{try{return JSON.parse(l);}catch{return null;}}).filter(Boolean);
-}
-function normalizeArrivals(arr){
-  return arr.map(x=>({
-    line: x.lineName || x.line || x.service || x.operatorRef || "Bus",
-    destination: x.destination || x.destinationName || x.direction || "—",
-    eta: x.eta || x.expectedArrival || x.aimedArrivalTime || x.bestDepartureEstimate || x.arrivalTime || "—"
-  }));
-}
-async function bodsArrivalsViaProxy(bbox){
-  if(!CONFIG.PROXY_BASE) throw new Error("NO_PROXY");
-  const url=`${CONFIG.PROXY_BASE}/bods?bbox=${encodeURIComponent(bbox)}`;
-  const r=await fetch(url,{cache:"no-store"});
-  if(!r.ok) throw new Error(`BODS ${r.status}`);
-  const ct=(r.headers.get("content-type")||"").toLowerCase();
-  if(ct.includes("json")) {
-    const j=await r.json();
-    const items=Array.isArray(j?.results)?j.results:Array.isArray(j)?j:[];
-    return normalizeArrivals(items);
-  }
-  const t=await r.text(); return normalizeArrivals(parseNdjson(t));
-}
-async function safeArrivalsHTML(center){
-  try{
-    const d=0.005;
-    const bbox=`${center.lat-d},${center.lat+d},${center.lon-d},${center.lon+d}`;
-    const items=await bodsArrivalsViaProxy(bbox);
-    if(!items.length) return `<em>No arrivals found right now.</em>`;
-    return `<ul class="arrivals">${items.slice(0,6).map(x=>`<li><strong>${x.line}</strong> → ${x.destination} • ${x.eta}</li>`).join('')}</ul>`;
-  }catch(e){
-    if(String(e.message).includes("NO_PROXY")) {
-      return `<em>Live arrivals require a proxy. Add <code>CONFIG.PROXY_BASE</code> to enable.</em>`;
-    }
-    return `<em>Arrivals temporarily unavailable.</em>`;
-  }
 }
 
 // ---- Popups (template + enhancer) ----
 function popupTemplate(stop){
-  // Skeletons in place of "Loading …"
   return `
     <div class="popup">
       <div style="font-weight:600;margin-bottom:4px;">${stop.name}${stop.ref?` <small>(${stop.ref})</small>`:''}</div>
-      <div class="weather" data-weather-for="${stop.lat},${stop.lon}">${skel('60%',14,6,'margin:4px 0')}</div>
-      <div class="arrivals">${skel('90%',14,6)}</div>
+      <div class="weather">${skel('60%',14,6,'margin:4px 0')}</div>
+      <div class="lines">${skel('90%',14,6)}</div>
     </div>`;
 }
 async function enhanceStopPopup(marker, stop){
   const p=marker.getPopup(); if(!p) return;
   const root=p.getElement(); if(!root) return;
   const wEl=root.querySelector('.weather'); if(wEl) renderWeather(wEl, stop.lat, stop.lon);
-  const aEl=root.querySelector('.arrivals'); if(aEl) aEl.innerHTML = await safeArrivalsHTML({lat:stop.lat, lon:stop.lon});
+
+  const linesEl = root.querySelector('.lines');
+  if (linesEl) {
+    try {
+      const lines = await fetchStopLines(stop.id);
+      linesEl.innerHTML = `<div><strong>Served by</strong></div>${linesBadgesHTML(lines)}`;
+    } catch {
+      linesEl.innerHTML = `<em class="muted">Routes unavailable</em>`;
+    }
+  }
 }
 // Helper: bind + enhance reliably
 function bindPopupWithEnhancement(marker, stop){
@@ -354,12 +383,17 @@ async function listNearbyStops(){
       <span class="stop-kind kind-bus">Bus</span>
       ${s.ref?`<span class="pill">${s.ref}</span>`:''}
     </div>
-    <div class="stop-wx" id="wx-${s.id}">${skel('80%',14,6)}</div>`;
+    <div class="stop-wx" id="wx-${s.id}">${skel('80%',14,6)}</div>
+    <div class="stop-lines" id="ln-${s.id}" style="grid-column:1/-1;">${skel('95%',14,6,'margin-top:4px;')}</div>`;
     listEl.appendChild(item);
+
     const wxEl=item.querySelector(`#wx-${s.id}`); renderWeather(wxEl, s.lat, s.lon).catch(()=>{});
-    const arrDiv=document.createElement('div'); arrDiv.className='muted'; arrDiv.style.fontSize='12px'; arrDiv.innerHTML=skel('95%',14,6,'margin-top:4px;');
-    item.appendChild(arrDiv);
-    safeArrivalsHTML({lat:s.lat, lon:s.lon}).then(html=>arrDiv.innerHTML=html);
+    const lnEl=item.querySelector(`#ln-${s.id}`);
+    fetchStopLines(s.id).then(lines=>{
+      lnEl.innerHTML = lines.length
+        ? `<div class="muted" style="font-size:12px;">Routes:</div>${linesBadgesHTML(lines)}`
+        : `<span class="muted">No routes listed</span>`;
+    }).catch(()=> lnEl.innerHTML = `<span class="muted">Routes unavailable</span>`);
   }
   return stops;
 }
@@ -444,7 +478,7 @@ function updateHomeUI(){
   }
 }
 
-// ---- Best card renderer (with weather + mini 3h forecast) ----
+// ---- Best card renderer (with weather + mini 3h forecast + routes) ----
 function ensureBestCard(){
   if (el('#beststop')) return el('#beststop');
   const asideStack = document.querySelector('aside .stack');
@@ -462,12 +496,14 @@ async function renderBestCard(best){
 
   const { board, alight, w1, w2 } = best;
 
-  let arrivalsHTML = skel('100%', 14, 6);
-  try { arrivalsHTML = await safeArrivalsHTML({ lat: board.lat, lon: board.lon }); }
-  catch { arrivalsHTML = '<em>Arrivals unavailable.</em>'; }
-
   const walkToStop = w1 ? fmtMins(w1.duration_s/60) : '—';
   const walkHome   = w2 ? fmtMins(w2.duration_s/60) : '—';
+
+  // Preload lines (don’t block UI)
+  const [boardLines, alightLines] = await Promise.all([
+    fetchStopLines(board.id).catch(()=>[]),
+    fetchStopLines(alight.id).catch(()=>[])
+  ]);
 
   card.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
@@ -487,8 +523,11 @@ async function renderBestCard(best){
         <div class="muted" style="font-size:12px;margin-bottom:6px;">${fmtCoord(board.lat, board.lon)}</div>
         <div id="best-wx-board" style="margin:2px 0">${skel('60%',14,6)}</div>
         <div class="mini-forecast" id="best-forecast-board">${skel('90%',14,6)}</div>
-        <div class="kv" style="margin-top:6px;"><span>Walk to stop</span><span><strong>${walkToStop}</strong></span></div>
-        <div style="margin-top:6px;">${arrivalsHTML}</div>
+        <div style="margin-top:6px;">
+          <div class="muted" style="font-size:12px;">Routes:</div>
+          ${linesBadgesHTML(boardLines)}
+        </div>
+        <div class="kv" style="margin-top:8px;"><span>Walk to stop</span><span><strong>${walkToStop}</strong></span></div>
       </div>
 
       <div>
@@ -496,8 +535,12 @@ async function renderBestCard(best){
         <div class="muted" style="font-size:12px;margin-bottom:6px;">${fmtCoord(alight.lat, alight.lon)}</div>
         <div id="best-wx-alight" style="margin:2px 0">${skel('60%',14,6)}</div>
         <div class="mini-forecast" id="best-forecast-alight">${skel('90%',14,6)}</div>
-        <div class="kv" style="margin-top:6px;"><span>Walk home</span><span><strong>${walkHome}</strong></span></div>
-        <div class="muted" style="font-size:12px;margin-top:6px;">(Bus travel time not included)</div>
+        <div style="margin-top:6px;">
+          <div class="muted" style="font-size:12px;">Routes:</div>
+          ${linesBadgesHTML(alightLines)}
+        </div>
+        <div class="kv" style="margin-top:8px;"><span>Walk home</span><span><strong>${walkHome}</strong></span></div>
+        <div class="muted" style="font-size:12px;margin-top:6px;">(Live bus times removed; this shows walking only.)</div>
       </div>
     </div>
   `;
@@ -565,7 +608,7 @@ function wireButtons(){
     if (bestPulsePin) { map.removeLayer(bestPulsePin); bestPulsePin = null; }
     if (alightRingPin) { map.removeLayer(alightRingPin); alightRingPin = null; }
 
-    // Board: green pulsing + popup (bind listener BEFORE opening)
+    // Board: green pulsing + popup
     bestPulsePin = bindPopupWithEnhancement(L.marker([board.lat, board.lon], {
       icon: L.divIcon({
         className: '',
@@ -578,9 +621,9 @@ function wireButtons(){
         iconAnchor: [11,11]
       })
     }).addTo(map), board);
-    bestPulsePin.openPopup(); // listener already bound ✅
+    bestPulsePin.openPopup();
 
-    // Alight: red ring + full popup
+    // Alight: red ring + popup
     alightRingPin = bindPopupWithEnhancement(L.marker([alight.lat, alight.lon], {
       title: `Alight: ${alight.name}`,
       icon: L.divIcon({
