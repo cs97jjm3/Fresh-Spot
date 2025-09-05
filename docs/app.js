@@ -8,6 +8,7 @@
    - Weather: Open-Meteo (no key) + mini 3h forecast
    - Arrivals: BODS via Cloudflare Worker (CONFIG.PROXY_BASE)
    - Best stop: green pulsing Board + red ring Alight, walking legs, Best card
+   - Popups reliably enhanced (weather + arrivals)
    - Skeleton placeholders instead of "Loading …"
 */
 
@@ -31,7 +32,7 @@ window.CONFIG = Object.assign({
 const el  = sel => document.querySelector(sel);
 const fmtMins = mins => `${Math.round(mins)} min`;
 const toRad = d => d * Math.PI / 180;
-const toDeg = r => r * 180 / Math.PI;
+const toDeg = r => r * Math.PI / 180 * 180/Math.PI; // (kept simple below)
 function debounce(fn, wait=300){ let t; return (...a)=>{ clearTimeout(t); t=setTimeout(()=>fn(...a), wait);} }
 function haversineMeters(a, b){
   const R=6371000, dLat=toRad(b.lat-a.lat), dLon=toRad(b.lon-a.lon);
@@ -43,16 +44,17 @@ function bearingDeg(from, to){
   const φ1=toRad(from.lat), φ2=toRad(to.lat), λ1=toRad(from.lon), λ2=toRad(to.lon);
   const y=Math.sin(λ2-λ1)*Math.cos(φ2);
   const x=Math.cos(φ1)*Math.sin(φ2)-Math.sin(φ1)*Math.cos(φ2)*Math.cos(λ2-λ1);
-  return (toDeg(Math.atan2(y,x))+360)%360;
+  return (Math.atan2(y,x)*180/Math.PI+360)%360;
 }
 function angleDiff(a,b){let d=Math.abs(a-b)%360;return d>180?360-d:d;}
 function showError(msg){const box=el('#errors');if(!box)return;box.style.display='block';box.textContent=msg;setTimeout(()=>{box.style.display='none';},6000);}
+function fmtCoord(lat, lon){ return `${lat.toFixed(4)}, ${lon.toFixed(4)}`; }
 
-// ---- Skeleton placeholder ----
+// Skeleton placeholder
 function skel(width='100%', height=14, radius=8, style=''){
   return `<div style="width:${width};height:${height}px;border-radius:${radius}px;background:linear-gradient(90deg,#f3f4f6 25%,#e5e7eb 37%,#f3f4f6 63%);background-size:400% 100%;animation:skel 1.2s ease infinite;${style}"></div>`;
 }
-// Inject keyframes once (idempotent)
+// Inject skeleton keyframes once
 (function injectSkelCSS(){
   if (document.getElementById('skel-anim')) return;
   const s=document.createElement('style'); s.id='skel-anim';
@@ -66,19 +68,30 @@ let currentSelection = null; // {lat, lon, label?}
 let home = {...CONFIG.HOME};
 let lastBest = null; // { origin, board, alight, w1, w2 }
 
-// ---- DOM helpers for Best card ----
-function ensureBestCard(){
-  if (el('#beststop')) return el('#beststop');
-  const asideStack = document.querySelector('aside .stack');
-  if (!asideStack) return null;
-  const card = document.createElement('div');
-  card.id = 'beststop';
-  card.className = 'card';
-  card.style.display = 'none';
-  asideStack.insertBefore(card, el('#stops') || asideStack.firstChild);
-  return card;
+// ---- Map init ----
+function initMap(center){
+  if (map) return;
+  map = L.map('map').setView([center.lat, center.lon], 15);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19, attribution: '&copy; OpenStreetMap'
+  }).addTo(map);
+
+  homeMarker = L.marker([home.lat, home.lon], { title: 'Home' })
+    .addTo(map)
+    .bindPopup('Home');
+
+  stopsLayer = L.layerGroup().addTo(map);
+  routeLayer = L.layerGroup().addTo(map);
+
+  // Pick a selection by clicking the map
+  map.on('click', async e=>{
+    const {lat,lng}=e.latlng;
+    currentSelection = { lat, lon: lng, label: 'Selected point' };
+    map.setView([lat,lng], Math.max(map.getZoom(), 15));
+    await refreshSelection();
+    await listNearbyStops();
+  });
 }
-function fmtCoord(lat, lon){ return `${lat.toFixed(4)}, ${lon.toFixed(4)}`; }
 
 // ---- Weather (Open-Meteo) ----
 async function getWeather(lat, lon){
@@ -224,7 +237,7 @@ async function findBestPair(origin, home) {
     if (n.includes('horsefair')) return -250;
     if (n.includes('bus station') || n.includes('interchange')) return -120;
     return 0;
-    };
+  };
   const alight = nearHome
     .filter(s => s.id !== board.id)
     .map(s => ({ s, score: haversineMeters(home, s) + nameBoost(s.name) }))
@@ -293,7 +306,7 @@ async function safeArrivalsHTML(center){
   }
 }
 
-// ---- Popups ----
+// ---- Popups (template + enhancer) ----
 function popupTemplate(stop){
   // Skeletons in place of "Loading …"
   return `
@@ -308,6 +321,12 @@ async function enhanceStopPopup(marker, stop){
   const root=p.getElement(); if(!root) return;
   const wEl=root.querySelector('.weather'); if(wEl) renderWeather(wEl, stop.lat, stop.lon);
   const aEl=root.querySelector('.arrivals'); if(aEl) aEl.innerHTML = await safeArrivalsHTML({lat:stop.lat, lon:stop.lon});
+}
+// Helper: bind + enhance reliably
+function bindPopupWithEnhancement(marker, stop){
+  marker.bindPopup(popupTemplate(stop));
+  marker.on('popupopen', () => enhanceStopPopup(marker, stop));
+  return marker;
 }
 
 // ---- Selection + Stops list ----
@@ -328,8 +347,7 @@ async function listNearbyStops(){
   catch(e){ showError("Couldn’t load stops (network busy). Try again in a moment."); }
   stopsLayer.clearLayers(); listEl.innerHTML='';
   for(const s of stops){
-    const m=L.marker([s.lat,s.lon],{title:s.name}).addTo(stopsLayer).bindPopup(popupTemplate(s));
-    m.on('popupopen',()=>enhanceStopPopup(m,s));
+    const m=bindPopupWithEnhancement(L.marker([s.lat,s.lon],{title:s.name}).addTo(stopsLayer), s);
     const item=document.createElement('div'); item.className='stop-item';
     item.innerHTML=`<div class="stop-left">
       <div class="stop-name">${s.name}</div>
@@ -426,135 +444,27 @@ function updateHomeUI(){
   }
 }
 
-// ---- Buttons ----
-function wireButtons(){
-  const btnLoc = el('#btn-my-location');
-  if (btnLoc) btnLoc.onclick = async ()=>{
-    try {
-      const pos = await getBrowserLocation();
-      currentSelection = pos;
-      map.setView([pos.lat, pos.lon], 15);
-      if (!userMarker) userMarker = L.marker([pos.lat, pos.lon], { title:'You' }).addTo(map).bindPopup('You are here');
-      else userMarker.setLatLng([pos.lat, pos.lon]);
-      await refreshSelection();
-      await listNearbyStops();
-    } catch { showError('Could not get your location.'); }
-  };
-
-  const btnBest = el('#btn-best-stop'), bestLabel = el('#best-label');
-  if (btnBest) btnBest.onclick = async ()=>{
-    const origin = currentSelection
-      || (userMarker ? { lat:userMarker.getLatLng().lat, lon:userMarker.getLatLng().lng } : null)
-      || home;
-
-    let pair;
-    try { pair = await findBestPair(origin, home); }
-    catch (e) { showError(e.message || 'Could not find suitable stops.'); return; }
-    const { board, alight } = pair;
-
-    // Routes
-    clearRoute();
-    let w1=null, w2=null;
-    try { w1 = await getWalkRoute(origin, board); drawGeoJSON(w1.geojson, { color:'#22c55e' }); } catch {}
-    try { w2 = await getWalkRoute(alight, home); drawGeoJSON(w2.geojson, { color:'#ef4444' }); } catch {}
-    writeWalkSummary(w1, w2, board, alight);
-
-    // Save + render Best card (includes weather + mini forecast)
-    lastBest = { origin, board, alight, w1, w2 };
-    await renderBestCard(lastBest);
-    // Also render mini forecasts
-    const card = ensureBestCard();
-    if (card) {
-      const wxb = card.querySelector('#best-wx-board + .mini-forecast');
-      const wxa = card.querySelector('#best-wx-alight + .mini-forecast');
-      // (Handled in renderBestCard below; keeping here if you adjust markup)
-    }
-
-    // Remove previous markers
-    if (bestPulsePin) { map.removeLayer(bestPulsePin); bestPulsePin = null; }
-    if (alightRingPin) { map.removeLayer(alightRingPin); alightRingPin = null; }
-
-    // Board: DISTINCT green pulsing marker + popup
-    bestPulsePin = L.marker([board.lat, board.lon], {
-      icon: L.divIcon({
-        className: '',
-        html: `
-          <div style="width:22px;height:22px;background:#22c55e;border:2px solid #fff;border-radius:50%;box-shadow:0 2px 10px rgba(0,0,0,.25);position:relative;">
-            <div style="position:absolute;left:50%;top:50%;width:22px;height:22px;transform:translate(-50%,-50%);border-radius:50%;border:2px solid rgba(34,197,94,.6);animation:pulse 1.6s ease-out infinite;"></div>
-          </div>
-        `,
-        iconSize: [22,22],
-        iconAnchor: [11,11]
-      })
-    })
-    .addTo(map)
-    .bindPopup(popupTemplate(board));
-
-    bestPulsePin.openPopup();
-    bestPulsePin.on('popupopen', () => enhanceStopPopup(bestPulsePin, board));
-
-    // Alight: RED RING marker + full popup (weather + arrivals)
-    alightRingPin = L.marker([alight.lat, alight.lon], {
-      title: `Alight: ${alight.name}`,
-      icon: L.divIcon({
-        className: '',
-        html: `
-          <div style="width:22px;height:22px;border:3px solid #ef4444;border-radius:50%;background:rgba(239,68,68,0.12);box-shadow:0 2px 10px rgba(0,0,0,.15);"></div>
-        `,
-        iconSize: [22,22],
-        iconAnchor: [11,11]
-      })
-    })
-    .addTo(map)
-    .bindPopup(popupTemplate(alight));
-
-    alightRingPin.on('popupopen', () => enhanceStopPopup(alightRingPin, alight));
-
-    if (bestLabel) {
-      bestLabel.style.display = 'inline-block';
-      setTimeout(()=> bestLabel.style.display='none', 6000);
-    }
-
-    map.setView([board.lat, board.lon], 16);
-  };
-
-  const btnClear = el('#btn-clear-route');
-  if (btnClear) btnClear.onclick = ()=>{
-    clearRoute();
-    writeDirections('');
-    if (bestPulsePin) { map.removeLayer(bestPulsePin); bestPulsePin = null; }
-    if (alightRingPin) { map.removeLayer(alightRingPin); alightRingPin = null; }
-    lastBest = null;
-    renderBestCard(null);
-  };
-}
-
-// ---- Browser geolocation helper ----
-async function getBrowserLocation(){
-  return new Promise((res,rej)=>{
-    if(!navigator.geolocation) return rej(new Error("No geolocation"));
-    navigator.geolocation.getCurrentPosition(
-      p=>res({lat:p.coords.latitude,lon:p.coords.longitude}),
-      err=>rej(err),
-      {enableHighAccuracy:true,timeout:8000,maximumAge:10000}
-    );
-  });
-}
-
 // ---- Best card renderer (with weather + mini 3h forecast) ----
+function ensureBestCard(){
+  if (el('#beststop')) return el('#beststop');
+  const asideStack = document.querySelector('aside .stack');
+  if (!asideStack) return null;
+  const card = document.createElement('div');
+  card.id = 'beststop';
+  card.className = 'card';
+  card.style.display = 'none';
+  asideStack.insertBefore(card, el('#stops') || asideStack.firstChild);
+  return card;
+}
 async function renderBestCard(best){
   const card = ensureBestCard(); if (!card) return;
   if (!best) { card.style.display='none'; card.innerHTML=''; return; }
 
   const { board, alight, w1, w2 } = best;
 
-  // Arrivals HTML for the board stop
   let arrivalsHTML = skel('100%', 14, 6);
-  try {
-    arrivalsHTML = await safeArrivalsHTML({ lat: board.lat, lon: board.lon });
-  } catch {
-    arrivalsHTML = '<em>Arrivals unavailable.</em>';
-  }
+  try { arrivalsHTML = await safeArrivalsHTML({ lat: board.lat, lon: board.lon }); }
+  catch { arrivalsHTML = '<em>Arrivals unavailable.</em>'; }
 
   const walkToStop = w1 ? fmtMins(w1.duration_s/60) : '—';
   const walkHome   = w2 ? fmtMins(w2.duration_s/60) : '—';
@@ -593,7 +503,6 @@ async function renderBestCard(best){
   `;
   card.style.display = 'block';
 
-  // Weather + mini forecasts
   const wxBoard = card.querySelector('#best-wx-board');
   const wxAlight = card.querySelector('#best-wx-alight');
   const fcBoard = card.querySelector('#best-forecast-board');
@@ -603,7 +512,6 @@ async function renderBestCard(best){
   if (fcBoard)  renderMiniForecast(fcBoard,  board.lat,  board.lon).catch(()=>{});
   if (fcAlight) renderMiniForecast(fcAlight, alight.lat, alight.lon).catch(()=>{});
 
-  // Focus buttons
   const fb = el('#best-focus-board');
   const fa = el('#best-focus-alight');
   if (fb) fb.onclick = () => {
@@ -614,6 +522,104 @@ async function renderBestCard(best){
     map.setView([alight.lat, alight.lon], 16);
     if (alightRingPin) alightRingPin.openPopup();
   };
+}
+
+// ---- Buttons ----
+function wireButtons(){
+  const btnLoc = el('#btn-my-location');
+  if (btnLoc) btnLoc.onclick = async ()=>{
+    try {
+      const pos = await getBrowserLocation();
+      currentSelection = pos;
+      map.setView([pos.lat, pos.lon], 15);
+      if (!userMarker) userMarker = L.marker([pos.lat, pos.lon], { title:'You' }).addTo(map).bindPopup('You are here');
+      else userMarker.setLatLng([pos.lat, pos.lon]);
+      await refreshSelection();
+      await listNearbyStops();
+    } catch { showError('Could not get your location.'); }
+  };
+
+  const btnBest = el('#btn-best-stop'), bestLabel = el('#best-label');
+  if (btnBest) btnBest.onclick = async ()=>{
+    const origin = currentSelection
+      || (userMarker ? { lat:userMarker.getLatLng().lat, lon:userMarker.getLatLng().lng } : null)
+      || home;
+
+    let pair;
+    try { pair = await findBestPair(origin, home); }
+    catch (e) { showError(e.message || 'Could not find suitable stops.'); return; }
+    const { board, alight } = pair;
+
+    // Routes
+    clearRoute();
+    let w1=null, w2=null;
+    try { w1 = await getWalkRoute(origin, board); drawGeoJSON(w1.geojson, { color:'#22c55e' }); } catch {}
+    try { w2 = await getWalkRoute(alight, home); drawGeoJSON(w2.geojson, { color:'#ef4444' }); } catch {}
+    writeWalkSummary(w1, w2, board, alight);
+
+    // Save + render Best card
+    lastBest = { origin, board, alight, w1, w2 };
+    await renderBestCard(lastBest);
+
+    // Remove previous markers
+    if (bestPulsePin) { map.removeLayer(bestPulsePin); bestPulsePin = null; }
+    if (alightRingPin) { map.removeLayer(alightRingPin); alightRingPin = null; }
+
+    // Board: green pulsing + popup (bind listener BEFORE opening)
+    bestPulsePin = bindPopupWithEnhancement(L.marker([board.lat, board.lon], {
+      icon: L.divIcon({
+        className: '',
+        html: `
+          <div style="width:22px;height:22px;background:#22c55e;border:2px solid #fff;border-radius:50%;box-shadow:0 2px 10px rgba(0,0,0,.25);position:relative;">
+            <div style="position:absolute;left:50%;top:50%;width:22px;height:22px;transform:translate(-50%,-50%);border-radius:50%;border:2px solid rgba(34,197,94,.6);animation:pulse 1.6s ease-out infinite;"></div>
+          </div>
+        `,
+        iconSize: [22,22],
+        iconAnchor: [11,11]
+      })
+    }).addTo(map), board);
+    bestPulsePin.openPopup(); // listener already bound ✅
+
+    // Alight: red ring + full popup
+    alightRingPin = bindPopupWithEnhancement(L.marker([alight.lat, alight.lon], {
+      title: `Alight: ${alight.name}`,
+      icon: L.divIcon({
+        className: '',
+        html: `<div style="width:22px;height:22px;border:3px solid #ef4444;border-radius:50%;background:rgba(239,68,68,0.12);box-shadow:0 2px 10px rgba(0,0,0,.15);"></div>`,
+        iconSize: [22,22],
+        iconAnchor: [11,11]
+      })
+    }).addTo(map), alight);
+
+    if (bestLabel) {
+      bestLabel.style.display = 'inline-block';
+      setTimeout(()=> bestLabel.style.display='none', 6000);
+    }
+
+    map.setView([board.lat, board.lon], 16);
+  };
+
+  const btnClear = el('#btn-clear-route');
+  if (btnClear) btnClear.onclick = ()=>{
+    clearRoute();
+    writeDirections('');
+    if (bestPulsePin) { map.removeLayer(bestPulsePin); bestPulsePin = null; }
+    if (alightRingPin) { map.removeLayer(alightRingPin); alightRingPin = null; }
+    lastBest = null;
+    renderBestCard(null);
+  };
+}
+
+// ---- Browser geolocation helper ----
+async function getBrowserLocation(){
+  return new Promise((res,rej)=>{
+    if(!navigator.geolocation) return rej(new Error("No geolocation"));
+    navigator.geolocation.getCurrentPosition(
+      p=>res({lat:p.coords.latitude,lon:p.coords.longitude}),
+      err=>rej(err),
+      {enableHighAccuracy:true,timeout:8000,maximumAge:10000}
+    );
+  });
 }
 
 // ---- MAIN ----
@@ -641,32 +647,6 @@ async function main(){
 
   wireButtons();
   wireHomeSearch();
-
-   // ---- Map init ----
-function initMap(center){
-  if (map) return;
-  map = L.map('map').setView([center.lat, center.lon], 15);
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    maxZoom: 19, attribution: '&copy; OpenStreetMap'
-  }).addTo(map);
-
-  homeMarker = L.marker([home.lat, home.lon], { title: 'Home' })
-    .addTo(map)
-    .bindPopup('Home');
-
-  stopsLayer = L.layerGroup().addTo(map);
-  routeLayer = L.layerGroup().addTo(map);
-
-  // Map click to pick a new selection
-  map.on('click', async e=>{
-    const {lat,lng}=e.latlng;
-    currentSelection = { lat, lon: lng, label: 'Selected point' };
-    map.setView([lat,lng], Math.max(map.getZoom(), 15));
-    await refreshSelection();
-    await listNearbyStops();
-  });
-}
-
 }
 
 // ---- Start ----
