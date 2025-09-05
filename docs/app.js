@@ -1,13 +1,17 @@
 /* ===========================
    FreshStop - app.js (browser)
    ===========================
+   Tweaks:
+   - “+ more routes” expander (first 10 visible, then toggle)
+   - Share link (deep-link to lat/lon/zoom)
+   - Overpass caching (sessionStorage) for speed
+   - First-time Home prompt (UK & Ireland-only search)
+   Core:
    - Start at browser location (fallback: saved Home → London)
-   - Only "Set Home" search (autocomplete)
-   - Nearby stops (Overpass) with mirrors + timeout
-   - Weather: Open-Meteo (no key) + mini 3h forecast
-   - BEST STOP: green pulsing Board + red ring Alight, walking legs, Best card
-   - Popups/list show SERVED LINES (🚌/🚆/🚊…) from OSM route relations (no live arrivals)
-   - Robust route fetching: looks for stop_position/platform near the stop
+   - Nearby stops via Overpass (mirrors + timeout)
+   - Weather: Open-Meteo (no key)
+   - BEST STOP: board/alight + walking via OSRM
+   - NO live arrivals (removed need for a proxy)
 */
 
 // ---- Config defaults (override in config.js) ----
@@ -22,7 +26,8 @@ window.CONFIG = Object.assign({
   SEARCH_RADIUS_M: 900,
   MAX_STOPS: 60,
   WALK_SPEED_MPS: 1.3,
-  OVERPASS_TIMEOUT_MS: 9000
+  OVERPASS_TIMEOUT_MS: 9000,
+  CACHE_TTL_MS: 5 * 60 * 1000 // 5 min
 }, window.CONFIG || {});
 
 // ---- Helpers ----
@@ -46,8 +51,9 @@ function bearingDeg(from, to){
 function angleDiff(a,b){let d=Math.abs(a-b)%360;return d>180?360-d:d;}
 function showError(msg){const box=el('#errors');if(!box)return;box.style.display='block';box.textContent=msg;setTimeout(()=>{box.style.display='none';},6000);}
 function fmtCoord(lat, lon){ return `${lat.toFixed(4)}, ${lon.toFixed(4)}`; }
+function nowMs(){ return Date.now(); }
 
-// Skeleton placeholder
+// Skeleton
 function skel(width='100%', height=14, radius=8, style=''){
   return `<div style="width:${width};height:${height}px;border-radius:${radius}px;background:linear-gradient(90deg,#f3f4f6 25%,#e5e7eb 37%,#f3f4f6 63%);background-size:400% 100%;animation:skel 1.2s ease infinite;${style}"></div>`;
 }
@@ -58,6 +64,44 @@ function skel(width='100%', height=14, radius=8, style=''){
   document.head.appendChild(s);
 })();
 
+// ---- URL share helpers ----
+function makeShareURL(lat, lon, zoom = map ? map.getZoom() : 15){
+  const u = new URL(location.href);
+  u.searchParams.set('lat', lat.toFixed(5));
+  u.searchParams.set('lon', lon.toFixed(5));
+  u.searchParams.set('z', zoom);
+  return u.toString();
+}
+async function copyToClipboard(text){
+  try{ await navigator.clipboard.writeText(text); return true; }
+  catch{ return false; }
+}
+function parseURLCenter(){
+  const p = new URLSearchParams(location.search);
+  const lat = parseFloat(p.get('lat'));
+  const lon = parseFloat(p.get('lon'));
+  const z = parseInt(p.get('z') || '15', 10);
+  if (Number.isFinite(lat) && Number.isFinite(lon)) return { lat, lon, z: Number.isFinite(z)?z:15 };
+  return null;
+}
+
+// ---- Cache (sessionStorage) ----
+function cacheKey(kind, obj){ return `fs:${kind}:${JSON.stringify(obj)}`; }
+function cacheGet(kind, obj){
+  try{
+    const raw = sessionStorage.getItem(cacheKey(kind,obj));
+    if(!raw) return null;
+    const { t, v } = JSON.parse(raw);
+    if (nowMs() - t > CONFIG.CACHE_TTL_MS) { sessionStorage.removeItem(cacheKey(kind,obj)); return null; }
+    return v;
+  }catch{ return null; }
+}
+function cacheSet(kind, obj, value){
+  try{
+    sessionStorage.setItem(cacheKey(kind,obj), JSON.stringify({ t: nowMs(), v: value }));
+  }catch{/* quota full */}
+}
+
 // ---- Map / State ----
 let map, userMarker, homeMarker, stopsLayer, routeLayer, bestPulsePin, alightRingPin;
 let currentSelection = null; // {lat, lon, label?}
@@ -67,7 +111,7 @@ let lastBest = null; // { origin, board, alight, w1, w2 }
 // ---- Map init ----
 function initMap(center){
   if (map) return;
-  map = L.map('map').setView([center.lat, center.lon], 15);
+  map = L.map('map').setView([center.lat, center.lon], center.z || 15);
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 19, attribution: '&copy; OpenStreetMap'
   }).addTo(map);
@@ -79,6 +123,7 @@ function initMap(center){
   stopsLayer = L.layerGroup().addTo(map);
   routeLayer = L.layerGroup().addTo(map);
 
+  // Click to pin & share
   map.on('click', async e=>{
     const {lat,lng}=e.latlng;
     currentSelection = { lat, lon: lng, label: 'Selected point' };
@@ -134,15 +179,19 @@ async function renderMiniForecast(container, lat, lon){
   }catch{ container.innerHTML = skel('90%',14,6); }
 }
 
-// ---- Overpass (with retries) ----
+// ---- Overpass (with retries + cache) ----
 async function fetchWithTimeout(url, opts={}, timeoutMs=CONFIG.OVERPASS_TIMEOUT_MS){
   const ctrl=new AbortController(); const t=setTimeout(()=>ctrl.abort(), timeoutMs);
   try{ return await fetch(url, { ...opts, signal: ctrl.signal }); }
   finally{ clearTimeout(t); }
 }
-async function overpassJSON(query){
+async function overpassJSON(query, cacheKind=null, cacheKeyObj=null){
+  if (cacheKind && cacheKeyObj) {
+    const c = cacheGet(cacheKind, cacheKeyObj);
+    if (c) return c;
+  }
   const body="data="+encodeURIComponent(query);
-  let lastErr=null;
+  let lastErr=null, json=null;
   for (const base of CONFIG.OVERPASS_MIRRORS) {
     try{
       const r = await fetchWithTimeout(base, {
@@ -151,19 +200,23 @@ async function overpassJSON(query){
         body
       });
       if (!r.ok) { lastErr = new Error(`Overpass ${r.status} at ${base}`); continue; }
-      return await r.json();
+      json = await r.json();
+      break;
     }catch(e){ lastErr = e; }
   }
-  throw lastErr || new Error("Overpass failed");
+  if (!json) throw lastErr || new Error("Overpass failed");
+  if (cacheKind && cacheKeyObj) cacheSet(cacheKind, cacheKeyObj, json);
+  return json;
 }
 async function fetchStopsAround(lat, lon, radiusM=CONFIG.SEARCH_RADIUS_M){
+  const key = { lat: +lat.toFixed(4), lon: +lon.toFixed(4), r: radiusM };
   const q=`[out:json][timeout:25];
     (
       node(around:${radiusM},${lat},${lon})["highway"="bus_stop"];
       node(around:${radiusM},${lat},${lon})["public_transport"="platform"]["bus"="yes"];
     );
     out body ${Math.min(CONFIG.MAX_STOPS,200)};`;
-  const j = await overpassJSON(q);
+  const j = await overpassJSON(q, 'stops', key);
   return (j.elements||[]).map(n=>({
     id:n.id,
     name:n.tags?.name||"Bus stop",
@@ -172,6 +225,7 @@ async function fetchStopsAround(lat, lon, radiusM=CONFIG.SEARCH_RADIUS_M){
   }));
 }
 async function fetchStopsAroundExtended(lat, lon, radiusM = CONFIG.SEARCH_RADIUS_M) {
+  const key = { lat: +lat.toFixed(4), lon: +lon.toFixed(4), r: radiusM, ext:true };
   const q = `[out:json][timeout:25];
     (
       node(around:${radiusM},${lat},${lon})["highway"="bus_stop"];
@@ -179,7 +233,7 @@ async function fetchStopsAroundExtended(lat, lon, radiusM = CONFIG.SEARCH_RADIUS
       node(around:${radiusM},${lat},${lon})["amenity"="bus_station"];
     );
     out body ${Math.min(CONFIG.MAX_STOPS, 300)};`;
-  const j = await overpassJSON(q);
+  const j = await overpassJSON(q, 'stops', key);
   return (j.elements || []).map(n => ({
     id: n.id,
     name: n.tags?.name || (n.tags?.amenity === 'bus_station' ? 'Bus Station' : 'Bus stop'),
@@ -190,7 +244,7 @@ async function fetchStopsAroundExtended(lat, lon, radiusM = CONFIG.SEARCH_RADIUS
 }
 
 // ---- Lines for a stop (route relations via nearby PT members) ----
-const LINES_CACHE = new Map(); // stopId -> lines[]
+const LINES_MEMO = new Map(); // stopId -> lines[]
 const MODE_ICON = m => ({
   bus:'🚌', trolleybus:'🚎', tram:'🚊', train:'🚆',
   light_rail:'🚈', subway:'🚇'
@@ -198,11 +252,9 @@ const MODE_ICON = m => ({
 function uniqBy(arr, key) { const s=new Set(), out=[]; for(const x of arr){const k=key(x); if(s.has(k))continue; s.add(k); out.push(x);} return out; }
 
 async function fetchStopLines(stop){
-  const cache = LINES_CACHE.get(stop.id);
-  if (cache) return cache;
+  if (LINES_MEMO.has(stop.id)) return LINES_MEMO.get(stop.id);
 
-  // Look for any platforms/stop_positions within 60m of this stop,
-  // then get route relations that include those PT members.
+  const cacheKeyObj = { stop: stop.id };
   const q = `[out:json][timeout:25];
     node(${stop.id})->.s;
     (
@@ -211,7 +263,9 @@ async function fetchStopLines(stop){
     )->.pt;
     rel(bn.pt)["type"="route"]["route"~"bus|trolleybus|tram|train|light_rail|subway"];
     out tags;`;
-  let j=null; try { j = await overpassJSON(q); } catch(e){ console.warn('lines fail', e); LINES_CACHE.set(stop.id, []); return []; }
+  let j=null; 
+  try { j = await overpassJSON(q, 'lines', cacheKeyObj); }
+  catch(e){ console.warn('lines fail', e); LINES_MEMO.set(stop.id, []); return []; }
 
   const items = (j.elements||[])
     .map(rel => {
@@ -227,30 +281,65 @@ async function fetchStopLines(stop){
     })
     .filter(x => x.ref || x.name);
 
-  const clean = uniqBy(items, x => `${x.mode}|${x.ref || x.name}`).slice(0, 16);
-  LINES_CACHE.set(stop.id, clean);
+  const clean = uniqBy(items, x => `${x.mode}|${x.ref || x.name}`);
+  LINES_MEMO.set(stop.id, clean);
   return clean;
 }
-function linesBadgesHTML(lines){
+
+// ---- Lines badges with "+ more" expander ----
+function linesBadgesHTML(lines, opts={}){
+  const max = opts.max || 10;
+  const id = opts.id || ('lnc_'+Math.random().toString(36).slice(2,8));
   if (!lines || !lines.length) return `<span class="muted">No routes listed</span>`;
+
+  const collapsed = lines.slice(0, max);
+  const hidden = lines.slice(max);
+
+  const badge = l => `
+    <span class="pill" title="${(l.name || l.network || '').replace(/"/g,'&quot;')}">
+      ${MODE_ICON(l.mode)} ${l.ref || (l.name || '').split(' ')[0]}
+    </span>`;
+
+  if (!hidden.length) {
+    return `<div id="${id}" class="lines-badges" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:4px;">
+      ${collapsed.map(badge).join('')}
+    </div>`;
+  }
+  // with expander
   return `
-    <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:4px;">
-      ${lines.slice(0,16).map(l => `
-        <span class="pill" title="${l.name || l.network || ''}">
-          ${MODE_ICON(l.mode)} ${l.ref || (l.name || '').split(' ')[0]}
-        </span>
-      `).join('')}
+    <div id="${id}" class="lines-badges" data-collapsed="1" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:4px;">
+      ${collapsed.map(badge).join('')}
+      <button class="btn" style="padding:2px 8px;font-size:12px;border-radius:999px;" onclick="toggleLines('${id}', ${max})">+ ${hidden.length} more</button>
+      <span class="more" style="display:none;">${hidden.map(badge).join('')}</span>
     </div>`;
 }
 
-// ---- Best stops logic (smarter alight for Horsefair/Bus Station) ----
+// Global toggler for "+ more"
+window.toggleLines = function(id, max){
+  const box = document.getElementById(id);
+  if (!box) return;
+  const collapsed = box.getAttribute('data-collapsed') !== '0';
+  const btn = box.querySelector('button');
+  const more = box.querySelector('.more');
+  if (!btn || !more) return;
+  if (collapsed) {
+    more.style.display = 'contents';
+    btn.textContent = 'Show less';
+    box.setAttribute('data-collapsed','0');
+  } else {
+    more.style.display = 'none';
+    btn.textContent = '+ more';
+    box.setAttribute('data-collapsed','1');
+  }
+};
+
+// ---- Best stops logic (smart alight pref) ----
 async function findBestPair(origin, home) {
   const [nearOrigin, nearHome0] = await Promise.all([
     fetchStopsAround(origin.lat, origin.lon),
     fetchStopsAroundExtended(home.lat, home.lon, CONFIG.SEARCH_RADIUS_M)
   ]);
 
-  // If too few near home, widen progressively (up to ~3km)
   let nearHome = nearHome0;
   if (nearHome.length < 3) nearHome = await fetchStopsAroundExtended(home.lat, home.lon, CONFIG.SEARCH_RADIUS_M * 2);
   if (nearHome.length < 3) nearHome = await fetchStopsAroundExtended(home.lat, home.lon, CONFIG.SEARCH_RADIUS_M * 3.3);
@@ -270,18 +359,16 @@ async function findBestPair(origin, home) {
   // Alight: strong preference by name ("Horsefair", "Bus Station", "Interchange"), else nearest
   const nameBoost = (nm='') => {
     const n = nm.toLowerCase();
-    if (n.includes('horsefair')) return -800; // very strong nudge
+    if (n.includes('horsefair')) return -800;
     if (n.includes('bus station') || n.includes('interchange')) return -250;
     return 0;
   };
 
-  // First pass: score by distance + name boost
   let alight = nearHome
     .filter(s => s.id !== board.id)
     .map(s => ({ s, score: haversineMeters(home, s) + nameBoost(s.name) }))
     .sort((a,b)=> a.score - b.score)[0]?.s;
 
-  // If we still didn't land on a "Horsefair"/station and we're within ~3km, try a targeted name query
   if (!alight || (!/horsefair|bus station|interchange/i.test(alight.name) && haversineMeters(home, alight) > 250)) {
     const q = `[out:json][timeout:25];
       (
@@ -290,7 +377,7 @@ async function findBestPair(origin, home) {
       );
       out body 50;`;
     try {
-      const j = await overpassJSON(q);
+      const j = await overpassJSON(q, 'nameTarget', { home: [home.lat,home.lon].map(n=>+n.toFixed(4)), r: Math.round(CONFIG.SEARCH_RADIUS_M*3.3) });
       const cand = (j.elements||[])
         .map(n => ({ id:n.id, name:n.tags?.name||'Stop', lat:n.lat, lon:n.lon, ref:n.tags?.ref||null }))
         .sort((a,b)=> haversineMeters(home,a) - haversineMeters(home,b))[0];
@@ -298,7 +385,6 @@ async function findBestPair(origin, home) {
     } catch(e){ /* ignore, keep previous alight */ }
   }
 
-  // Fallback to pure nearest if somehow empty
   if (!alight) {
     alight = nearHome.sort((a,b)=>haversineMeters(home,a)-haversineMeters(home,b))[0];
   }
@@ -344,7 +430,8 @@ async function enhanceStopPopup(marker, stop){
   if (linesEl) {
     try {
       const lines = await fetchStopLines(stop);
-      linesEl.innerHTML = `<div><strong>Served by</strong></div>${linesBadgesHTML(lines)}`;
+      const id = 'pl_'+stop.id;
+      linesEl.innerHTML = `<div><strong>Served by</strong></div>${linesBadgesHTML(lines, { id, max: 10 })}`;
     } catch {
       linesEl.innerHTML = `<em class="muted">Routes unavailable</em>`;
     }
@@ -361,8 +448,23 @@ async function refreshSelection(){
   const card=el('#selection'); if(!card) return;
   if(!currentSelection){ card.style.display='none'; card.innerHTML=''; return; }
   const {lat,lon,label}=currentSelection;
+  const shareURL = makeShareURL(lat, lon);
   card.style.display='block';
-  card.innerHTML=`<div><strong>${label||'Point'}</strong><br><span class="muted" style="font-size:12px">${lat.toFixed(5)}, ${lon.toFixed(5)}</span></div>`;
+  card.innerHTML=`
+    <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;">
+      <div>
+        <strong>${label||'Point'}</strong><br>
+        <span class="muted" style="font-size:12px">${lat.toFixed(5)}, ${lon.toFixed(5)}</span>
+      </div>
+      <button class="btn" id="btn-share-pin" title="Copy a link to this pin">Share</button>
+    </div>`;
+  const btn = el('#btn-share-pin');
+  if (btn) btn.onclick = async ()=>{
+    const ok = await copyToClipboard(shareURL);
+    btn.textContent = ok ? 'Copied!' : 'Link ready';
+    setTimeout(()=> btn.textContent='Share', 1700);
+    history.replaceState({}, '', shareURL); // reflect in URL too
+  };
 }
 async function listNearbyStops(){
   const card=el('#stops'); const listEl=el('#stops-list'); const radiusEl=el('#stops-radius');
@@ -376,30 +478,29 @@ async function listNearbyStops(){
   for(const s of stops){
     bindPopupWithEnhancement(L.marker([s.lat,s.lon],{title:s.name}).addTo(stopsLayer), s);
     const item=document.createElement('div'); item.className='stop-item';
+    const id = 'ln_'+s.id;
     item.innerHTML=`<div class="stop-left">
       <div class="stop-name">${s.name}</div>
       <span class="stop-kind kind-bus">Bus</span>
       ${s.ref?`<span class="pill">${s.ref}</span>`:''}
     </div>
     <div class="stop-wx" id="wx-${s.id}">${skel('80%',14,6)}</div>
-    <div class="stop-lines" id="ln-${s.id}" style="grid-column:1/-1;">${skel('95%',14,6,'margin-top:4px;')}</div>`;
+    <div class="stop-lines" id="${id}" style="grid-column:1/-1;">${skel('95%',14,6,'margin-top:4px;')}</div>`;
     listEl.appendChild(item);
 
     const wxEl=item.querySelector(`#wx-${s.id}`); renderWeather(wxEl, s.lat, s.lon).catch(()=>{});
-    const lnEl=item.querySelector(`#ln-${s.id}`);
     fetchStopLines(s).then(lines=>{
-      lnEl.innerHTML = lines.length
-        ? `<div class="muted" style="font-size:12px;">Routes:</div>${linesBadgesHTML(lines)}`
-        : `<span class="muted">No routes listed</span>`;
-    }).catch(()=> lnEl.innerHTML = `<span class="muted">Routes unavailable</span>`);
+      el('#'+id).innerHTML = `<div class="muted" style="font-size:12px;">Routes:</div>${linesBadgesHTML(lines, { id, max: 10 })}`;
+    }).catch(()=> el('#'+id).innerHTML = `<span class="muted">Routes unavailable</span>`);
   }
   return stops;
 }
 
-// ---- Only: Set Home search (keep pill toggle) ----
+// ---- Only: Set Home search (UK + Ireland) ----
 async function geocode(text){
-  const url=`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(text)}&addressdetails=1&limit=5`;
-  const r=await fetch(url,{headers:{'Accept':'application/json'}}); if(!r.ok) throw new Error('Search failed');
+  const url=`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(text)}&addressdetails=1&limit=5&countrycodes=gb,ie`;
+  const r=await fetch(url,{headers:{'Accept':'application/json','Accept-Language':'en-GB'}}); 
+  if(!r.ok) throw new Error('Search failed');
   const j=await r.json(); return j.map(x=>({lat:+x.lat, lon:+x.lon, label:x.display_name}));
 }
 function wireHomeSearch(){
@@ -425,6 +526,7 @@ function wireHomeSearch(){
         setHome({ name: pick.label, lat: pick.lat, lon: pick.lon });
         await listNearbyStops();
         if (lastBest) await renderBestCard(lastBest);
+        hideHomeOverlay(); // in case it was open
       });
     }catch{ showError('Home search failed.'); }
   }, 350));
@@ -476,7 +578,59 @@ function updateHomeUI(){
   }
 }
 
-// ---- Best card (weather + mini forecast + routes) ----
+// ---- Home overlay (first-time prompt) ----
+function showHomeOverlay(){
+  if (document.getElementById('home-overlay')) return;
+  const d = document.createElement('div');
+  d.id = 'home-overlay';
+  d.style.cssText = `
+    position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:9999;
+  `;
+  d.innerHTML = `
+    <div class="card" style="max-width:520px;width:92%;padding:16px;border-radius:16px;">
+      <div style="font-weight:700;font-size:18px;margin-bottom:6px;">Set your Home</div>
+      <div class="muted" style="margin-bottom:10px;">To pick the best stop, tell us where “Home” is. (UK & Ireland only)</div>
+      <div class="row" style="gap:8px;">
+        <input id="home-overlay-input" type="text" placeholder="e.g. PE13 2PR or address" style="flex:1;padding:10px;border-radius:10px;border:1px solid #e5e7eb;"/>
+        <button class="btn primary" id="home-overlay-close">Skip</button>
+      </div>
+      <div id="home-overlay-results" class="dropdown" style="display:none;margin-top:6px;"></div>
+    </div>`;
+  document.body.appendChild(d);
+
+  // wire inner search (UK/IE only)
+  const input = d.querySelector('#home-overlay-input');
+  const drop = d.querySelector('#home-overlay-results');
+  const close= d.querySelector('#home-overlay-close');
+  const renderDrop=(root, items, onPick)=>{
+    if(!items.length){ root.style.display='none'; root.innerHTML=''; return; }
+    root.innerHTML = items.map((r,i)=>`<button data-i="${i}">${r.label}</button>`).join('');
+    root.style.display='block';
+    Array.from(root.querySelectorAll('button')).forEach(b=>{
+      b.onclick=()=>onPick(items[+b.dataset.i]);
+    });
+  };
+  input.addEventListener('input', debounce(async ()=>{
+    const q=input.value.trim();
+    if(q.length<2){ drop.style.display='none'; return; }
+    try{
+      const res=await geocode(q);
+      renderDrop(drop, res, async pick=>{
+        drop.style.display='none';
+        setHome({ name: pick.label, lat: pick.lat, lon: pick.lon });
+        if (map) { map.setView([pick.lat, pick.lon], 15); homeMarker.setLatLng([pick.lat, pick.lon]); }
+        await listNearbyStops(); hideHomeOverlay();
+      });
+    }catch{/* ignore */}
+  }, 300));
+  close.onclick = ()=> hideHomeOverlay();
+}
+function hideHomeOverlay(){
+  const d = document.getElementById('home-overlay');
+  if (d) d.remove();
+}
+
+// ---- Best card (weather + forecast + routes + share) ----
 function ensureBestCard(){
   if (el('#beststop')) return el('#beststop');
   const asideStack = document.querySelector('aside .stack');
@@ -502,6 +656,12 @@ async function renderBestCard(best){
     fetchStopLines(alight).catch(()=>[])
   ]);
 
+  const boardShare = makeShareURL(board.lat, board.lon);
+  const alightShare= makeShareURL(alight.lat, alight.lon);
+
+  const idB = 'best-ln-b-'+board.id;
+  const idA = 'best-ln-a-'+alight.id;
+
   card.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
       <div style="font-weight:700;display:flex;align-items:center;gap:8px;">
@@ -516,28 +676,34 @@ async function renderBestCard(best){
 
     <div class="grid2" style="align-items:start;">
       <div>
-        <div style="font-weight:600;margin-bottom:4px;">Board: ${board.name}</div>
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <div style="font-weight:600;margin-bottom:4px;">Board: ${board.name}</div>
+          <button class="btn" id="share-board" title="Copy link to Board">Share</button>
+        </div>
         <div class="muted" style="font-size:12px;margin-bottom:6px;">${fmtCoord(board.lat, board.lon)}</div>
         <div id="best-wx-board" style="margin:2px 0">${skel('60%',14,6)}</div>
         <div class="mini-forecast" id="best-forecast-board">${skel('90%',14,6)}</div>
         <div style="margin-top:6px;">
           <div class="muted" style="font-size:12px;">Routes:</div>
-          ${linesBadgesHTML(boardLines)}
+          ${linesBadgesHTML(boardLines, { id: idB, max: 10 })}
         </div>
         <div class="kv" style="margin-top:8px;"><span>Walk to stop</span><span><strong>${walkToStop}</strong></span></div>
       </div>
 
       <div>
-        <div style="font-weight:600;margin-bottom:4px;">Alight: ${alight.name}</div>
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <div style="font-weight:600;margin-bottom:4px;">Alight: ${alight.name}</div>
+          <button class="btn" id="share-alight" title="Copy link to Alight">Share</button>
+        </div>
         <div class="muted" style="font-size:12px;margin-bottom:6px;">${fmtCoord(alight.lat, alight.lon)}</div>
         <div id="best-wx-alight" style="margin:2px 0">${skel('60%',14,6)}</div>
         <div class="mini-forecast" id="best-forecast-alight">${skel('90%',14,6)}</div>
         <div style="margin-top:6px;">
           <div class="muted" style="font-size:12px;">Routes:</div>
-          ${linesBadgesHTML(alightLines)}
+          ${linesBadgesHTML(alightLines, { id: idA, max: 10 })}
         </div>
         <div class="kv" style="margin-top:8px;"><span>Walk home</span><span><strong>${walkHome}</strong></span></div>
-        <div class="muted" style="font-size:12px;margin-top:6px;">(Live bus times removed; this shows walking only.)</div>
+        <div class="muted" style="font-size:12px;margin-top:6px;">(Live bus times removed; walking only.)</div>
       </div>
     </div>
   `;
@@ -561,6 +727,19 @@ async function renderBestCard(best){
   if (fa) fa.onclick = () => {
     map.setView([alight.lat, alight.lon], 16);
     if (alightRingPin) alightRingPin.openPopup();
+  };
+
+  const sb = el('#share-board');
+  const sa = el('#share-alight');
+  if (sb) sb.onclick = async ()=>{
+    const ok = await copyToClipboard(boardShare);
+    sb.textContent = ok ? 'Copied!' : 'Link ready';
+    setTimeout(()=> sb.textContent='Share', 1500);
+  };
+  if (sa) sa.onclick = async ()=>{
+    const ok = await copyToClipboard(alightShare);
+    sa.textContent = ok ? 'Copied!' : 'Link ready';
+    setTimeout(()=> sa.textContent='Share', 1500);
   };
 }
 
@@ -666,23 +845,39 @@ async function getBrowserLocation(){
 async function main(){
   loadHome();
 
-  // Prefer browser location at startup
+  // Parse deep-link first
+  const deeplink = parseURLCenter();
+
+  // Prefer browser location, else deep-link, else saved home, else default
   let center;
   try { center = await getBrowserLocation(); }
-  catch { center = (home && Number.isFinite(home.lat)) ? home : CONFIG.HOME; }
+  catch { center = deeplink || (home && Number.isFinite(home.lat) ? {...home, z: 15} : CONFIG.HOME); }
 
   initMap(center);
   updateHomeUI();
 
-  currentSelection = { lat:center.lat, lon:center.lon, label:(center===home)?home.name:'My location' };
-  if(center && currentSelection.label==='My location'){
-    userMarker=L.marker([center.lat,center.lon]).addTo(map).bindPopup('You are here');
+  if (deeplink) {
+    currentSelection = { lat: deeplink.lat, lon: deeplink.lon, label: 'Shared pin' };
+    map.setView([deeplink.lat, deeplink.lon], deeplink.z || 15);
+  } else {
+    currentSelection = { lat:center.lat, lon:center.lon, label:(center.lat===home.lat && center.lon===home.lon)?home.name:'My location' };
+  }
+
+  if(currentSelection.label==='My location'){
+    userMarker=L.marker([currentSelection.lat,currentSelection.lon]).addTo(map).bindPopup('You are here');
   }
 
   ensureBestCard();
 
   await refreshSelection();
   await listNearbyStops();
+
+  // If no saved Home and we failed geolocate (and no deeplink), prompt for Home
+  const hasSavedHome = !!localStorage.getItem('freshstop.home');
+  if (!hasSavedHome && !deeplink) {
+    try { await getBrowserLocation(); /* ok, no overlay */ }
+    catch { showHomeOverlay(); }
+  }
 
   wireButtons();
   wireHomeSearch();
