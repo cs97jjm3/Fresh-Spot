@@ -11,6 +11,7 @@
    - Route badges with “+ more” expander
    - Share links for selection and best board/alight
    - No live arrivals (no proxy required)
+   - Loader: bus→train animation hooks (showLoader/hideLoader)
 */
 
 // ---- Config defaults (override in config.js) ----
@@ -53,7 +54,20 @@ function showError(msg){const box=el('#errors');if(!box)return;box.style.display
 function fmtCoord(lat, lon){ return `${lat.toFixed(4)}, ${lon.toFixed(4)}`; }
 function nowMs(){ return Date.now(); }
 
-// Skeleton
+// Loader hooks (paired with HTML snippet in index.html)
+function showLoader(msg="Finding the best route…"){
+  const box = document.getElementById('fs-loader');
+  if (!box) return;
+  const t = box.querySelector('.fs-loader-text');
+  if (t) t.textContent = msg;
+  box.style.display = 'flex';
+}
+function hideLoader(){
+  const box = document.getElementById('fs-loader');
+  if (box) box.style.display = 'none';
+}
+
+// Skeleton shimmer (used inside cards)
 function skel(width='100%', height=14, radius=8, style=''){
   return `<div style="width:${width};height:${height}px;border-radius:${radius}px;background:linear-gradient(90deg,#f3f4f6 25%,#e5e7eb 37%,#f3f4f6 63%);background-size:400% 100%;animation:skel 1.2s ease infinite;${style}"></div>`;
 }
@@ -129,8 +143,13 @@ function initMap(center){
     const {lat,lng}=e.latlng;
     currentSelection = { lat, lon: lng, label: 'Selected point' };
     map.setView([lat,lng], Math.max(map.getZoom(), 15));
-    await refreshSelection();
-    await listNearbyStops();
+    showLoader("Finding nearby stops…");
+    try {
+      await refreshSelection();
+      await listNearbyStops();
+    } finally {
+      hideLoader();
+    }
   });
 }
 
@@ -420,7 +439,6 @@ async function drawBusPolylineBetween(board, alight, ref){
 }
 function addBusRefLabel(board, alight, ref){
   if (!ref) return;
-  // Midpoint along straight line for a simple label placement
   const midLat = (board.lat + alight.lat)/2;
   const midLon = (board.lon + alight.lon)/2;
   busLabelMarker = L.marker([midLat, midLon], {
@@ -434,7 +452,6 @@ function addBusRefLabel(board, alight, ref){
 
 // ---- Best stops logic (smart alight pref) ----
 async function findBestPair(origin, home) {
-  // prefer NaPTAN if available
   let nearOrigin = [];
   try {
     if (CONFIG.NAPTAN_URL) nearOrigin = await fetchStopsAroundNaPTAN(origin.lat, origin.lon);
@@ -447,7 +464,6 @@ async function findBestPair(origin, home) {
   } catch {}
   if (!nearHome0.length) nearHome0 = await fetchStopsAroundExtended(home.lat, home.lon, CONFIG.SEARCH_RADIUS_M);
 
-  // widen home search if sparse
   let nearHome = nearHome0;
   if (nearHome.length < 3) nearHome = await fetchStopsAroundExtended(home.lat, home.lon, CONFIG.SEARCH_RADIUS_M * 2);
   if (nearHome.length < 3) nearHome = await fetchStopsAroundExtended(home.lat, home.lon, CONFIG.SEARCH_RADIUS_M * 3.3);
@@ -455,16 +471,11 @@ async function findBestPair(origin, home) {
   if (!nearOrigin.length) throw new Error("No stops near origin");
   if (!nearHome.length)   throw new Error("No stops near home");
 
-  // Board: close + aligned toward home
   const homeBrng = bearingDeg(origin, home);
   const board = nearOrigin
-    .map(s => ({
-      s,
-      score: haversineMeters(origin, s) + angleDiff(bearingDeg(s, home), homeBrng) * 3
-    }))
+    .map(s => ({ s, score: haversineMeters(origin, s) + angleDiff(bearingDeg(s, home), homeBrng) * 3 }))
     .sort((a,b)=> a.score - b.score)[0].s;
 
-  // Alight: strong preference by name ("Horsefair", "Bus Station", "Interchange"), else nearest
   const nameBoost = (nm='') => {
     const n = nm.toLowerCase();
     if (n.includes('horsefair')) return -800;
@@ -637,9 +648,14 @@ function wireHomeSearch(){
       renderDrop(homeDrop, res, async pick=>{
         homeDrop.style.display='none';
         setHome({ name: pick.label, lat: pick.lat, lon: pick.lon });
-        await listNearbyStops();
-        if (lastBest) await renderBestCard(lastBest);
-        hideHomeOverlay();
+        showLoader("Updating home & nearby stops…");
+        try {
+          await listNearbyStops();
+          if (lastBest) await renderBestCard(lastBest);
+          hideHomeOverlay();
+        } finally {
+          hideLoader();
+        }
       });
     }catch{ showError('Home search failed.'); }
   }, 350));
@@ -729,7 +745,9 @@ function showHomeOverlay(){
         drop.style.display='none';
         setHome({ name: pick.label, lat: pick.lat, lon: pick.lon });
         if (map) { map.setView([pick.lat, pick.lon], 15); homeMarker.setLatLng([pick.lat, pick.lon]); }
-        await listNearbyStops(); hideHomeOverlay();
+        showLoader("Loading nearby stops…");
+        try { await listNearbyStops(); } finally { hideLoader(); }
+        hideHomeOverlay();
       });
     }catch{/* ignore */}
   }, 300));
@@ -857,6 +875,7 @@ function wireButtons(){
   const btnLoc = el('#btn-my-location');
   if (btnLoc) btnLoc.onclick = async ()=>{
     try {
+      showLoader("Locating you…");
       const pos = await getBrowserLocation();
       currentSelection = pos;
       map.setView([pos.lat, pos.lon], 15);
@@ -865,86 +884,92 @@ function wireButtons(){
       await refreshSelection();
       await listNearbyStops();
     } catch { showError('Could not get your location.'); }
+    finally { hideLoader(); }
   };
 
   const btnBest = el('#btn-best-stop'), bestLabel = el('#best-label');
   if (btnBest) btnBest.onclick = async ()=>{
-    const origin = currentSelection
-      || (userMarker ? { lat:userMarker.getLatLng().lat, lon:userMarker.getLatLng().lng } : null)
-      || home;
-
-    let pair;
-    try { pair = await findBestPair(origin, home); }
-    catch (e) { showError(e.message || 'Could not find suitable stops.'); return; }
-    const { board, alight } = pair;
-
-    // Draw walking legs
-    clearRoute();
-    let w1=null, w2=null;
-    try { w1 = await getWalkRoute(origin, board); drawGeoJSON(w1.geojson, { color:'#22c55e' }); } catch {}
-    try { w2 = await getWalkRoute(alight, home); drawGeoJSON(w2.geojson, { color:'#ef4444' }); } catch {}
-    writeWalkSummary(w1, w2, board, alight);
-
-    // Save + render Best card
-    lastBest = { origin, board, alight, w1, w2 };
-    await renderBestCard(lastBest);
-
-    // Remove previous markers
-    if (bestPulsePin) { map.removeLayer(bestPulsePin); bestPulsePin = null; }
-    if (alightRingPin) { map.removeLayer(alightRingPin); alightRingPin = null; }
-
-    // Board: green pulsing + popup
-    bestPulsePin = bindPopupWithEnhancement(L.marker([board.lat, board.lon], {
-      icon: L.divIcon({
-        className: '',
-        html: `
-          <div style="width:22px;height:22px;background:#22c55e;border:2px solid #fff;border-radius:50%;box-shadow:0 2px 10px rgba(0,0,0,.25);position:relative;">
-            <div style="position:absolute;left:50%;top:50%;width:22px;height:22px;transform:translate(-50%,-50%);border-radius:50%;border:2px solid rgba(34,197,94,.6);animation:pulse 1.6s ease-out infinite;"></div>
-          </div>
-        `,
-        iconSize: [22,22],
-        iconAnchor: [11,11]
-      })
-    }).addTo(map), board);
-    bestPulsePin.openPopup();
-
-    // Alight: red ring + popup
-    alightRingPin = bindPopupWithEnhancement(L.marker([alight.lat, alight.lon], {
-      title: `Alight: ${alight.name}`,
-      icon: L.divIcon({
-        className: '',
-        html: `<div style="width:22px;height:22px;border:3px solid #ef4444;border-radius:50%;background:rgba(239,68,68,0.12);box-shadow:0 2px 10px rgba(0,0,0,.15);"></div>`,
-        iconSize: [22,22],
-        iconAnchor: [11,11]
-      })
-    }).addTo(map), alight);
-
-    // Try to find a shared bus route ref between board and alight
-    let sharedRef = null;
+    showLoader("Finding the best stop…");   // Loader START
     try {
-      const [boardLines, alightLines] = await Promise.all([
-        fetchStopLines(board),
-        fetchStopLines(alight)
-      ]);
-      const boardBus = boardLines.filter(l => l.mode === 'bus' && l.ref);
-      const alightBus= alightLines.filter(l => l.mode === 'bus' && l.ref);
-      const alightSet = new Set(alightBus.map(l => `${l.ref}|${l.network||''}`));
-      const hit = boardBus.find(l => alightSet.has(`${l.ref}|${l.network||''}`) || alightSet.has(`${l.ref}|`));
-      if (hit) sharedRef = hit.ref;
-    } catch (e) { console.warn('sharedRef failed', e); }
+      const origin = currentSelection
+        || (userMarker ? { lat:userMarker.getLatLng().lat, lon:userMarker.getLatLng().lng } : null)
+        || home;
 
-    // Draw the bus section + label
-    const ok = await drawBusPolylineBetween(board, alight, sharedRef || '');
-    if (sharedRef) addBusRefLabel(board, alight, sharedRef);
-    if (!ok && sharedRef) showError(`Drew a simple link; couldn’t fetch the ${sharedRef} geometry here.`);
-    if (!sharedRef) showError('Couldn’t match a common bus line; showing a simple link between stops.');
+      let pair;
+      try { pair = await findBestPair(origin, home); }
+      catch (e) { showError(e.message || 'Could not find suitable stops.'); return; }
+      const { board, alight } = pair;
 
-    if (bestLabel) {
-      bestLabel.style.display = 'inline-block';
-      setTimeout(()=> bestLabel.style.display='none', 6000);
+      // Draw walking legs
+      clearRoute();
+      let w1=null, w2=null;
+      try { w1 = await getWalkRoute(origin, board); drawGeoJSON(w1.geojson, { color:'#22c55e' }); } catch {}
+      try { w2 = await getWalkRoute(alight, home); drawGeoJSON(w2.geojson, { color:'#ef4444' }); } catch {}
+      writeWalkSummary(w1, w2, board, alight);
+
+      // Save + render Best card
+      lastBest = { origin, board, alight, w1, w2 };
+      await renderBestCard(lastBest);
+
+      // Remove previous markers
+      if (bestPulsePin) { map.removeLayer(bestPulsePin); bestPulsePin = null; }
+      if (alightRingPin) { map.removeLayer(alightRingPin); alightRingPin = null; }
+
+      // Board: green pulsing + popup
+      bestPulsePin = bindPopupWithEnhancement(L.marker([board.lat, board.lon], {
+        icon: L.divIcon({
+          className: '',
+          html: `
+            <div style="width:22px;height:22px;background:#22c55e;border:2px solid #fff;border-radius:50%;box-shadow:0 2px 10px rgba(0,0,0,.25);position:relative;">
+              <div style="position:absolute;left:50%;top:50%;width:22px;height:22px;transform:translate(-50%,-50%);border-radius:50%;border:2px solid rgba(34,197,94,.6);animation:pulse 1.6s ease-out infinite;"></div>
+            </div>
+          `,
+          iconSize: [22,22],
+          iconAnchor: [11,11]
+        })
+      }).addTo(map), board);
+      bestPulsePin.openPopup();
+
+      // Alight: red ring + popup
+      alightRingPin = bindPopupWithEnhancement(L.marker([alight.lat, alight.lon], {
+        title: `Alight: ${alight.name}`,
+        icon: L.divIcon({
+          className: '',
+          html: `<div style="width:22px;height:22px;border:3px solid #ef4444;border-radius:50%;background:rgba(239,68,68,0.12);box-shadow:0 2px 10px rgba(0,0,0,.15);"></div>`,
+          iconSize: [22,22],
+          iconAnchor: [11,11]
+        })
+      }).addTo(map), alight);
+
+      // Try to find a shared bus route ref between board and alight
+      let sharedRef = null;
+      try {
+        const [boardLines, alightLines] = await Promise.all([
+          fetchStopLines(board),
+          fetchStopLines(alight)
+        ]);
+        const boardBus = boardLines.filter(l => l.mode === 'bus' && l.ref);
+        const alightBus= alightLines.filter(l => l.mode === 'bus' && l.ref);
+        const alightSet = new Set(alightBus.map(l => `${l.ref}|${l.network||''}`));
+        const hit = boardBus.find(l => alightSet.has(`${l.ref}|${l.network||''}`) || alightSet.has(`${l.ref}|`));
+        if (hit) sharedRef = hit.ref;
+      } catch (e) { console.warn('sharedRef failed', e); }
+
+      // Draw the bus section + label
+      const ok = await drawBusPolylineBetween(board, alight, sharedRef || '');
+      if (sharedRef) addBusRefLabel(board, alight, sharedRef);
+      if (!ok && sharedRef) showError(`Drew a simple link; couldn’t fetch the ${sharedRef} geometry here.`);
+      if (!sharedRef) showError('Couldn’t match a common bus line; showing a simple link between stops.');
+
+      if (bestLabel) {
+        bestLabel.style.display = 'inline-block';
+        setTimeout(()=> bestLabel.style.display='none', 6000);
+      }
+
+      map.setView([board.lat, board.lon], 16);
+    } finally {
+      hideLoader();                       // Loader END
     }
-
-    map.setView([board.lat, board.lon], 16);
   };
 
   const btnClear = el('#btn-clear-route');
@@ -999,7 +1024,11 @@ async function main(){
   ensureBestCard();
 
   await refreshSelection();
-  await listNearbyStops();
+
+  // Loader around initial nearby-stops load
+  showLoader("Loading nearby stops…");
+  try { await listNearbyStops(); }
+  finally { hideLoader(); }
 
   // If no saved Home and we failed geolocate (and no deeplink), prompt for Home
   const hasSavedHome = !!localStorage.getItem('freshstop.home');
