@@ -1,17 +1,16 @@
 /* ===========================
    FreshStop - app.js (browser)
    ===========================
-   Tweaks:
-   - “+ more routes” expander (first 10 visible, then toggle)
-   - Share link (deep-link to lat/lon/zoom)
-   - Overpass caching (sessionStorage) for speed
+   Features:
    - First-time Home prompt (UK & Ireland-only search)
-   Core:
    - Start at browser location (fallback: saved Home → London)
-   - Nearby stops via Overpass (mirrors + timeout)
+   - Nearby stops via Overpass (mirrors, timeout, session cache)
    - Weather: Open-Meteo (no key)
-   - BEST STOP: board/alight + walking via OSRM
-   - NO live arrivals (removed need for a proxy)
+   - “Best stop”: board + alight + walking via OSRM
+   - FULL ROUTE: draws bus polyline (OSM relation by shared ref) between stops, with 🚌 label
+   - Route badges with “+ more” expander
+   - Share links for selection and best board/alight
+   - No live arrivals (no proxy required)
 */
 
 // ---- Config defaults (override in config.js) ----
@@ -27,7 +26,8 @@ window.CONFIG = Object.assign({
   MAX_STOPS: 60,
   WALK_SPEED_MPS: 1.3,
   OVERPASS_TIMEOUT_MS: 9000,
-  CACHE_TTL_MS: 5 * 60 * 1000 // 5 min
+  CACHE_TTL_MS: 5 * 60 * 1000, // 5 min session cache
+  NAPTAN_URL: null // optional: set in config.js if you host a NaPTAN mini JSON
 }, window.CONFIG || {});
 
 // ---- Helpers ----
@@ -104,6 +104,7 @@ function cacheSet(kind, obj, value){
 
 // ---- Map / State ----
 let map, userMarker, homeMarker, stopsLayer, routeLayer, bestPulsePin, alightRingPin;
+let busLayer, busLabelMarker; // for bus segment + its label
 let currentSelection = null; // {lat, lon, label?}
 let home = {...CONFIG.HOME};
 let lastBest = null; // { origin, board, alight, w1, w2 }
@@ -208,6 +209,43 @@ async function overpassJSON(query, cacheKind=null, cacheKeyObj=null){
   if (cacheKind && cacheKeyObj) cacheSet(cacheKind, cacheKeyObj, json);
   return json;
 }
+
+// ---- Optional: NaPTAN mini JSON (if provided) ----
+let NAPTAN_DATA = null;
+async function loadNaPTAN() {
+  if (NAPTAN_DATA || !CONFIG.NAPTAN_URL) return;
+  const r = await fetch(CONFIG.NAPTAN_URL, { cache: "force-cache" });
+  if (!r.ok) throw new Error("NaPTAN load failed");
+  NAPTAN_DATA = await r.json();
+}
+function stopsInBbox(data, latMin, latMax, lonMin, lonMax, limit=CONFIG.MAX_STOPS) {
+  const out = [];
+  for (const s of data) {
+    if (s.lat >= latMin && s.lat <= latMax && s.lon >= lonMin && s.lon <= lonMax) {
+      out.push({
+        id: s.atcoCode,
+        name: s.name || "Bus stop",
+        lat: s.lat, lon: s.lon,
+        ref: s.atcoCode,
+        indicator: s.indicator || null,
+        area: s.stopAreaCode || null
+      });
+      if (out.length >= limit) break;
+    }
+  }
+  return out;
+}
+async function fetchStopsAroundNaPTAN(lat, lon, radiusM = CONFIG.SEARCH_RADIUS_M) {
+  await loadNaPTAN();
+  if (!NAPTAN_DATA) throw new Error("NaPTAN unavailable");
+  const dLat = radiusM / 111000;
+  const dLon = radiusM / (111000 * Math.cos(lat * Math.PI/180));
+  const box = stopsInBbox(NAPTAN_DATA, lat - dLat, lat + dLat, lon - dLon, lon + dLon, CONFIG.MAX_STOPS);
+  box.sort((a,b)=> haversineMeters({lat,lon},a) - haversineMeters({lat,lon},b));
+  return box;
+}
+
+// ---- Stops via Overpass ----
 async function fetchStopsAround(lat, lon, radiusM=CONFIG.SEARCH_RADIUS_M){
   const key = { lat: +lat.toFixed(4), lon: +lon.toFixed(4), r: radiusM };
   const q=`[out:json][timeout:25];
@@ -254,7 +292,6 @@ function uniqBy(arr, key) { const s=new Set(), out=[]; for(const x of arr){const
 async function fetchStopLines(stop){
   if (LINES_MEMO.has(stop.id)) return LINES_MEMO.get(stop.id);
 
-  const cacheKeyObj = { stop: stop.id };
   const q = `[out:json][timeout:25];
     node(${stop.id})->.s;
     (
@@ -264,7 +301,7 @@ async function fetchStopLines(stop){
     rel(bn.pt)["type"="route"]["route"~"bus|trolleybus|tram|train|light_rail|subway"];
     out tags;`;
   let j=null; 
-  try { j = await overpassJSON(q, 'lines', cacheKeyObj); }
+  try { j = await overpassJSON(q, 'lines', { stop: stop.id }); }
   catch(e){ console.warn('lines fail', e); LINES_MEMO.set(stop.id, []); return []; }
 
   const items = (j.elements||[])
@@ -273,6 +310,7 @@ async function fetchStopLines(stop){
       const ref = t.ref || t['ref:short'] || '';
       const name = t.name || '';
       return {
+        id: rel.id,
         mode: t.route || 'bus',
         ref: ref || (name ? name.split(' ')[0] : ''),
         name,
@@ -305,7 +343,6 @@ function linesBadgesHTML(lines, opts={}){
       ${collapsed.map(badge).join('')}
     </div>`;
   }
-  // with expander
   return `
     <div id="${id}" class="lines-badges" data-collapsed="1" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:4px;">
       ${collapsed.map(badge).join('')}
@@ -313,8 +350,6 @@ function linesBadgesHTML(lines, opts={}){
       <span class="more" style="display:none;">${hidden.map(badge).join('')}</span>
     </div>`;
 }
-
-// Global toggler for "+ more"
 window.toggleLines = function(id, max){
   const box = document.getElementById(id);
   if (!box) return;
@@ -333,13 +368,86 @@ window.toggleLines = function(id, max){
   }
 };
 
+// ---- FULL ROUTE: bus polyline between stops by shared ref ----
+function waysToFeatureCollection(ways){
+  return {
+    type: "FeatureCollection",
+    features: ways.map(w => ({
+      type: "Feature",
+      properties: { osmid: w.id },
+      geometry: {
+        type: "LineString",
+        coordinates: (w.geometry || []).map(p => [p.lon, p.lat])
+      }
+    }))
+  };
+}
+async function fetchRelationWaysByRefNear(ref, board, alight){
+  const around = 120; // meters
+  const q = `[out:json][timeout:25];
+    node(around:${around},${board.lat},${board.lon})->.B;
+    node(around:${around},${alight.lat},${alight.lon})->.A;
+    rel["type"="route"]["route"="bus"]["ref"="${ref}"](bn.B)->.RB;
+    rel["type"="route"]["route"="bus"]["ref"="${ref}"](bn.A)->.RA;
+    (.RB;.RA;)->.R;
+    way(r.R);
+    out geom;`;
+  const j = await overpassJSON(q, 'busGeom', { ref, b:[board.lat,board.lon].map(n=>+n.toFixed(4)), a:[alight.lat,alight.lon].map(n=>+n.toFixed(4)) });
+  return (j.elements || []).filter(e => e.type === 'way' && Array.isArray(e.geometry));
+}
+function clearBusLayer(){
+  if (busLayer) { routeLayer.removeLayer(busLayer); busLayer = null; }
+  if (busLabelMarker) { routeLayer.removeLayer(busLabelMarker); busLabelMarker = null; }
+}
+async function drawBusPolylineBetween(board, alight, ref){
+  clearBusLayer();
+  try{
+    if (!ref) throw new Error('no ref');
+    const ways = await fetchRelationWaysByRefNear(ref, board, alight);
+    if (!ways.length) throw new Error('No geometry for this ref nearby');
+    const fc = waysToFeatureCollection(ways);
+    busLayer = L.geoJSON(fc, { color:'#3b82f6', weight:4, opacity:0.9, dashArray:'4 2' }).addTo(routeLayer);
+    return true;
+  }catch(e){
+    console.warn('Bus polyline fallback:', e.message);
+    const seg = {
+      type: "Feature",
+      geometry: { type: "LineString", coordinates: [[board.lon,board.lat],[alight.lon,alight.lat]] }
+    };
+    busLayer = L.geoJSON(seg, { color:'#3b82f6', weight:4, opacity:0.8, dashArray:'6 6' }).addTo(routeLayer);
+    return false;
+  }
+}
+function addBusRefLabel(board, alight, ref){
+  if (!ref) return;
+  // Midpoint along straight line for a simple label placement
+  const midLat = (board.lat + alight.lat)/2;
+  const midLon = (board.lon + alight.lon)/2;
+  busLabelMarker = L.marker([midLat, midLon], {
+    interactive:false,
+    icon: L.divIcon({
+      className: '',
+      html:`<div class="pill" style="background:#dbeafe;border:1px solid #bfdbfe;font-size:12px;">🚌 ${ref}</div>`
+    })
+  }).addTo(routeLayer);
+}
+
 // ---- Best stops logic (smart alight pref) ----
 async function findBestPair(origin, home) {
-  const [nearOrigin, nearHome0] = await Promise.all([
-    fetchStopsAround(origin.lat, origin.lon),
-    fetchStopsAroundExtended(home.lat, home.lon, CONFIG.SEARCH_RADIUS_M)
-  ]);
+  // prefer NaPTAN if available
+  let nearOrigin = [];
+  try {
+    if (CONFIG.NAPTAN_URL) nearOrigin = await fetchStopsAroundNaPTAN(origin.lat, origin.lon);
+  } catch {}
+  if (!nearOrigin.length) nearOrigin = await fetchStopsAround(origin.lat, origin.lon);
 
+  let nearHome0 = [];
+  try {
+    if (CONFIG.NAPTAN_URL) nearHome0 = await fetchStopsAroundNaPTAN(home.lat, home.lon);
+  } catch {}
+  if (!nearHome0.length) nearHome0 = await fetchStopsAroundExtended(home.lat, home.lon, CONFIG.SEARCH_RADIUS_M);
+
+  // widen home search if sparse
   let nearHome = nearHome0;
   if (nearHome.length < 3) nearHome = await fetchStopsAroundExtended(home.lat, home.lon, CONFIG.SEARCH_RADIUS_M * 2);
   if (nearHome.length < 3) nearHome = await fetchStopsAroundExtended(home.lat, home.lon, CONFIG.SEARCH_RADIUS_M * 3.3);
@@ -363,7 +471,6 @@ async function findBestPair(origin, home) {
     if (n.includes('bus station') || n.includes('interchange')) return -250;
     return 0;
   };
-
   let alight = nearHome
     .filter(s => s.id !== board.id)
     .map(s => ({ s, score: haversineMeters(home, s) + nameBoost(s.name) }))
@@ -382,7 +489,7 @@ async function findBestPair(origin, home) {
         .map(n => ({ id:n.id, name:n.tags?.name||'Stop', lat:n.lat, lon:n.lon, ref:n.tags?.ref||null }))
         .sort((a,b)=> haversineMeters(home,a) - haversineMeters(home,b))[0];
       if (cand) alight = cand;
-    } catch(e){ /* ignore, keep previous alight */ }
+    } catch(e){ /* ignore */ }
   }
 
   if (!alight) {
@@ -399,7 +506,7 @@ async function getWalkRoute(from, to){
   const route=j.routes?.[0]; if(!route) throw new Error("No route");
   return { geojson: route.geometry, distance_m: route.distance, duration_s: route.duration };
 }
-function clearRoute(){ routeLayer.clearLayers(); }
+function clearRoute(){ routeLayer.clearLayers(); clearBusLayer(); }
 function drawGeoJSON(geojson, style={}){ routeLayer.addLayer(L.geoJSON(geojson, Object.assign({weight:5, opacity:.85}, style))); }
 function writeDirections(html){ const card=el('#directions'); if(!card)return; el('#directions-steps').innerHTML=html||''; card.style.display=html?'block':'none'; }
 function writeWalkSummary(w1, w2, board, alight){
@@ -408,7 +515,7 @@ function writeWalkSummary(w1, w2, board, alight){
   if(w1) steps.push(`<div class="dir-step">Walk to stop: ${fmtMins(w1.duration_s/60)}</div>`);
   if(alight) steps.push(`<div class="dir-step"><strong>Alight at:</strong> ${alight.name}</div>`);
   if(w2) steps.push(`<div class="dir-step">Walk home: ${fmtMins(w2.duration_s/60)}</div>`);
-  steps.push(`<div class="muted" style="font-size:12px;">(Live bus times removed; this shows walking only.)</div>`);
+  steps.push(`<div class="muted" style="font-size:12px;">(Live bus times removed; this shows walking only. Bus path is indicative.)</div>`);
   writeDirections(steps.join(''));
 }
 
@@ -463,7 +570,7 @@ async function refreshSelection(){
     const ok = await copyToClipboard(shareURL);
     btn.textContent = ok ? 'Copied!' : 'Link ready';
     setTimeout(()=> btn.textContent='Share', 1700);
-    history.replaceState({}, '', shareURL); // reflect in URL too
+    history.replaceState({}, '', shareURL);
   };
 }
 async function listNearbyStops(){
@@ -472,8 +579,14 @@ async function listNearbyStops(){
   const center=currentSelection || {lat:home.lat, lon:home.lon};
   card.style.display='block'; if(radiusEl) radiusEl.textContent=String(CONFIG.SEARCH_RADIUS_M);
   let stops=[];
-  try{ stops=await fetchStopsAround(center.lat, center.lon); }
-  catch(e){ showError("Couldn’t load stops (network busy). Try again in a moment."); }
+  try{
+    if (CONFIG.NAPTAN_URL) {
+      stops = await fetchStopsAroundNaPTAN(center.lat, center.lon);
+    }
+    if (!stops.length) {
+      stops = await fetchStopsAround(center.lat, center.lon);
+    }
+  } catch(e){ showError("Couldn’t load stops (network busy). Try again in a moment."); }
   stopsLayer.clearLayers(); listEl.innerHTML='';
   for(const s of stops){
     bindPopupWithEnhancement(L.marker([s.lat,s.lon],{title:s.name}).addTo(stopsLayer), s);
@@ -526,7 +639,7 @@ function wireHomeSearch(){
         setHome({ name: pick.label, lat: pick.lat, lon: pick.lon });
         await listNearbyStops();
         if (lastBest) await renderBestCard(lastBest);
-        hideHomeOverlay(); // in case it was open
+        hideHomeOverlay();
       });
     }catch{ showError('Home search failed.'); }
   }, 350));
@@ -583,9 +696,7 @@ function showHomeOverlay(){
   if (document.getElementById('home-overlay')) return;
   const d = document.createElement('div');
   d.id = 'home-overlay';
-  d.style.cssText = `
-    position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:9999;
-  `;
+  d.style.cssText = `position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:9999;`;
   d.innerHTML = `
     <div class="card" style="max-width:520px;width:92%;padding:16px;border-radius:16px;">
       <div style="font-weight:700;font-size:18px;margin-bottom:6px;">Set your Home</div>
@@ -598,7 +709,6 @@ function showHomeOverlay(){
     </div>`;
   document.body.appendChild(d);
 
-  // wire inner search (UK/IE only)
   const input = d.querySelector('#home-overlay-input');
   const drop = d.querySelector('#home-overlay-results');
   const close= d.querySelector('#home-overlay-close');
@@ -647,7 +757,6 @@ async function renderBestCard(best){
   if (!best) { card.style.display='none'; card.innerHTML=''; return; }
 
   const { board, alight, w1, w2 } = best;
-
   const walkToStop = w1 ? fmtMins(w1.duration_s/60) : '—';
   const walkHome   = w2 ? fmtMins(w2.duration_s/60) : '—';
 
@@ -769,7 +878,7 @@ function wireButtons(){
     catch (e) { showError(e.message || 'Could not find suitable stops.'); return; }
     const { board, alight } = pair;
 
-    // Routes
+    // Draw walking legs
     clearRoute();
     let w1=null, w2=null;
     try { w1 = await getWalkRoute(origin, board); drawGeoJSON(w1.geojson, { color:'#22c55e' }); } catch {}
@@ -809,6 +918,26 @@ function wireButtons(){
         iconAnchor: [11,11]
       })
     }).addTo(map), alight);
+
+    // Try to find a shared bus route ref between board and alight
+    let sharedRef = null;
+    try {
+      const [boardLines, alightLines] = await Promise.all([
+        fetchStopLines(board),
+        fetchStopLines(alight)
+      ]);
+      const boardBus = boardLines.filter(l => l.mode === 'bus' && l.ref);
+      const alightBus= alightLines.filter(l => l.mode === 'bus' && l.ref);
+      const alightSet = new Set(alightBus.map(l => `${l.ref}|${l.network||''}`));
+      const hit = boardBus.find(l => alightSet.has(`${l.ref}|${l.network||''}`) || alightSet.has(`${l.ref}|`));
+      if (hit) sharedRef = hit.ref;
+    } catch (e) { console.warn('sharedRef failed', e); }
+
+    // Draw the bus section + label
+    const ok = await drawBusPolylineBetween(board, alight, sharedRef || '');
+    if (sharedRef) addBusRefLabel(board, alight, sharedRef);
+    if (!ok && sharedRef) showError(`Drew a simple link; couldn’t fetch the ${sharedRef} geometry here.`);
+    if (!sharedRef) showError('Couldn’t match a common bus line; showing a simple link between stops.');
 
     if (bestLabel) {
       bestLabel.style.display = 'inline-block';
