@@ -8,7 +8,7 @@
    - Weather: Open-Meteo (no key)
    - Arrivals: BODS via Cloudflare Worker (CONFIG.PROXY_BASE)
    - Best stop: green pulsing Board marker + red ring Alight marker, walking legs, Best card
-   - Skeleton placeholders instead of "Loading …" text
+   - Skeleton placeholders instead of "Loading …"
 */
 
 // ---- Config defaults (override in config.js) ----
@@ -49,7 +49,7 @@ function bearingDeg(from, to){
 function angleDiff(a,b){let d=Math.abs(a-b)%360;return d>180?360-d:d;}
 function showError(msg){const box=el('#errors');if(!box)return;box.style.display='block';box.textContent=msg;setTimeout(()=>{box.style.display='none';},6000);}
 
-// Skeleton placeholder
+// ---- Skeleton placeholder ----
 function skel(width='100%', height=14, radius=8, style=''){
   return `<div style="width:${width};height:${height}px;border-radius:${radius}px;background:linear-gradient(90deg,#f3f4f6 25%,#e5e7eb 37%,#f3f4f6 63%);background-size:400% 100%;animation:skel 1.2s ease infinite;${style}"></div>`;
 }
@@ -86,7 +86,7 @@ async function renderBestCard(best){
   const card = ensureBestCard(); if (!card) return;
   if (!best) { card.style.display='none'; card.innerHTML=''; return; }
 
-  const { origin, board, alight, w1, w2 } = best;
+  const { board, alight, w1, w2 } = best;
 
   // Arrivals HTML for the board stop
   let arrivalsHTML = skel('100%', 14, 6);
@@ -225,7 +225,30 @@ function chooseStopsTowardsHome(origin, stops, home){
   const hb=bearingDeg(origin, home);
   const board = stops.map(s=>({s,score:haversineMeters(origin,s)+angleDiff(bearingDeg(s,home),hb)*3}))
                      .sort((a,b)=>a.score-b.score)[0].s;
-  const alight = stops.map(s=>({s,d:haversineMeters(home,s)})).sort((a,b)=>a.d-b.d)[0].s;
+  return board;
+}
+
+// Find best board (near origin, aligned to home) and best alight (near home)
+async function findBestPair(origin, home) {
+  const [nearOrigin, nearHome] = await Promise.all([
+    fetchStopsAround(origin.lat, origin.lon),
+    fetchStopsAround(home.lat, home.lon)
+  ]);
+  if (!nearOrigin.length) throw new Error("No stops near origin");
+  if (!nearHome.length)   throw new Error("No stops near home");
+
+  const homeBrng = bearingDeg(origin, home);
+  const board = nearOrigin
+    .map(s => ({
+      s,
+      score: haversineMeters(origin, s) + angleDiff(bearingDeg(s, home), homeBrng) * 3
+    }))
+    .sort((a,b)=> a.score - b.score)[0].s;
+
+  const alight = nearHome
+    .map(s => ({ s, d: haversineMeters(home, s) }))
+    .sort((a,b)=> a.d - b.d)[0].s;
+
   return { board, alight };
 }
 
@@ -332,7 +355,7 @@ async function listNearbyStops(){
       <span class="stop-kind kind-bus">Bus</span>
       ${s.ref?`<span class="pill">${s.ref}</span>`:''}
     </div>
-    <div class="stop-wx" id="wx-${s.id}">${skel(80,14,6)}</div>`;
+    <div class="stop-wx" id="wx-${s.id}">${skel('80%',14,6)}</div>`;
     listEl.appendChild(item);
     const wxEl=item.querySelector(`#wx-${s.id}`); renderWeather(wxEl, s.lat, s.lon).catch(()=>{});
     const arrDiv=document.createElement('div'); arrDiv.className='muted'; arrDiv.style.fontSize='12px'; arrDiv.innerHTML=skel('95%',14,6,'margin-top:4px;');
@@ -443,12 +466,9 @@ function wireButtons(){
       || (userMarker ? { lat:userMarker.getLatLng().lat, lon:userMarker.getLatLng().lng } : null)
       || home;
 
-    let stops=[];
-    try { stops = await fetchStopsAround(origin.lat, origin.lon); }
-    catch { showError('No stops found.'); return; }
-
-    const pair = chooseStopsTowardsHome(origin, stops, home);
-    if (!pair) { showError('No suitable stops.'); return; }
+    let pair;
+    try { pair = await findBestPair(origin, home); } // uses both origin+home areas
+    catch (e) { showError(e.message || 'Could not find suitable stops.'); return; }
     const { board, alight } = pair;
 
     // Routes
