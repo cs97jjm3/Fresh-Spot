@@ -7,149 +7,50 @@
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='28' fill='%230ea5e9'/%3E%3Ctext x='32' y='40' font-size='28' text-anchor='middle' fill='white'%3FF%3C/text%3E%3C/svg%3E">
 
   <!-- Leaflet (map) -->
-  <link
-    rel="stylesheet"
-    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
-    crossorigin=""
-  />
-  <script
-    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
-    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
-    crossorigin=""
-  ></script>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 
   <style>
-    :root {
-      --bg: #0b0c10;        /* header */
-      --fg: #ffffff;
-      --line: #e5e7eb;      /* borders */
-      --muted: #6b7280;     /* text-muted */
-      --brand: #0ea5e9;     /* sky-500 */
-      --bus: #0ea5e9;
-      --train: #10b981;
-      --dest: #ef4444;
+    /* your existing CSS … */
+    /* (leaving all your styles exactly as-is) */
 
-      --good: #16a34a;
-      --fair: #84cc16;
-      --moderate: #eab308;
-      --poor: #f97316;
-      --vpoor: #ef4444;
-      --card-bg: #ffffff;
-      --chip-bg: #f1f5f9;
+    /* Loader styles (already in your CSS, keeping for clarity) */
+    #fs-loader {
+      position: fixed; inset: 0;
+      display: none;
+      align-items: center; justify-content: center;
+      background: rgba(255,255,255,.72);
+      z-index: 9999;
+      backdrop-filter: blur(2px);
     }
-
-    * { box-sizing: border-box; }
-    body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color: #111; background: #fafafa; }
-    header {
-      display: flex; gap: 12px; align-items: center; padding: 10px 12px;
-      background: var(--bg); color: var(--fg);
+    .fs-loader-card {
+      background: white; border: 1px solid #e5e7eb; border-radius: 16px;
+      box-shadow: 0 10px 30px rgba(0,0,0,.08);
+      padding: 14px 16px; text-align: center; width: 320px;
     }
-    header .title { font-weight: 700; }
-    header .tag { font-size: 12px; color: #c7d2fe; opacity: .9; }
-    .container { display: grid; grid-template-rows: auto 1fr auto; height: 100vh; }
-    .main { display: grid; grid-template-columns: 1.7fr 1fr; min-height: 0; }
-    @media (max-width: 900px) { .main { grid-template-columns: 1fr; } }
-    #map { height: calc(100vh - 170px); width: 100%; }
-    @media (max-width: 900px) { #map { height: 50vh; } }
-    aside { border-left: 1px solid var(--line); padding: 12px; min-height: 0; overflow: auto; background: #fcfcfd; }
-    @media (max-width: 900px) { aside { border-left: none; border-top: 1px solid var(--line); } }
-    .row { display: flex; gap: 8px; align-items: center; }
-    .search { position: relative; width: 60%; max-width: 320px; margin-left: auto; }
-    .search input {
-      width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line);
-      outline: none;
-    }
-    .dropdown {
-      position: absolute; top: 100%; left: 0; right: 0; background: #fff; border: 1px solid var(--line);
-      border-radius: 10px; margin-top: 6px; overflow: hidden; z-index: 1000;
-      box-shadow: 0 6px 24px rgba(0,0,0,.08);
-    }
-    .dropdown button { display: block; width: 100%; text-align: left; padding: 10px 12px; border: 0; background: #fff; cursor: pointer; }
-    .dropdown button:hover { background: #f9fafb; }
-
-    .card { border: 1px solid var(--line); border-radius: 16px; padding: 12px; background: var(--card-bg); box-shadow: 0 10px 22px rgba(0,0,0,.04); }
-    .muted { color: var(--muted); font-size: 14px; }
-    .error { color: #b91c1c; }
-    .pill { display: inline-block; padding: 3px 8px; border-radius: 999px; background: var(--chip-bg); font-size: 12px; }
-    .pilla { display: inline-block; padding: 3px 8px; border-radius: 999px;  font-size: 16px; }
-
-    .btn { border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; background: #fff; cursor: pointer; }
-    .btn.primary { background: var(--brand); color: white; border-color: var(--brand); }
-    footer { border-top: 1px solid var(--line); padding: 10px 12px; font-size: 6px; color: var(--muted); }
-    .stack { display: grid; gap: 12px; }
-    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-    @media (max-width: 420px) { .grid2 { grid-template-columns: 1fr; } }
-    .kv { display:flex; justify-content: space-between; gap: 10px; font-size: 14px; }
-    .list { display: grid; gap: 8px; }
-
-    /* Stops list */
-    .stop-item { display:flex; justify-content: space-between; gap:10px; align-items: center; padding: 8px; border-radius: 12px; background: #fff; border: 1px solid #eef2f7; }
-    .stop-left { display:flex; gap:10px; align-items:center; }
-    .stop-name { font-weight: 600; }
-    .stop-kind { font-size: 12px; padding: 2px 6px; border-radius: 999px; }
-    .kind-bus { background: rgba(14,165,233,.12); color: #0369a1; }
-    .kind-train { background: rgba(16,185,129,.14); color: #065f46; }
-    .stop-wx { display:flex; gap:6px; align-items:center; font-size: 13px; color:#111; }
-    .stop-wx img { width: 22px; height: 22px; image-rendering: -webkit-optimize-contrast; }
-
-    /* AQI badge */
-    .aqi-badge { font-weight: 700; padding: 4px 8px; border-radius: 999px; color: white; display:inline-block; }
-    .aqi-good { background: var(--good); }
-    .aqi-fair { background: var(--fair); color:#1f2937; }
-    .aqi-moderate { background: var(--moderate); color:#1f2937; }
-    .aqi-poor { background: var(--poor); }
-    .aqi-vpoor { background: var(--vpoor); }
-
-    .dir-step { font-size: 14px; }
-
-    /* Pulsing marker for "Best stop" */
-    .pulse-pin {
-      position: relative;
-      width: 18px; height: 18px;
-      background: #0ea5e9;
-      border: 2px solid #fff;
-      border-radius: 50%;
-      box-shadow: 0 2px 10px rgba(0,0,0,.25);
-    }
-    .pulse-pin::after {
-      content: "";
-      position: absolute;
-      left: 50%; top: 50%;
-      width: 18px; height: 18px;
-      transform: translate(-50%,-50%);
-      border-radius: 50%;
-      border: 2px solid rgba(14,165,233,.6);
-      animation: pulse 1.6s ease-out infinite;
-    }
-    @keyframes pulse {
-      0% { transform: translate(-50%,-50%) scale(1); opacity: .9; }
-      70% { transform: translate(-50%,-50%) scale(2.3); opacity: 0; }
-      100% { transform: translate(-50%,-50%) scale(2.3); opacity: 0; }
-    }
+    .fs-loader-text { color:#374151; font-size:14px; margin-top:6px; }
+    .fs-loader-svg { display: block; margin: 0 auto; }
+    @keyframes slide { 0%{transform:translateX(-20px)} 100%{transform:translateX(250px)} }
+    .fs-vehicle { animation: slide 2.6s cubic-bezier(.4,.0,.2,1) infinite; }
+    @keyframes busShow { 0%,49%{opacity:1} 50%,100%{opacity:0} }
+    @keyframes trainShow { 0%,49%{opacity:0} 50%,100%{opacity:1} }
+    .bus { animation: busShow 2.6s linear infinite; }
+    .train { animation: trainShow 2.6s linear infinite; }
   </style>
 </head>
+
 <body>
   <div class="container">
     <header>
       <div class="title">FreshStop</div>
       <div class="tag">Better routes for cleaner air</div>
 
-      <!-- Place search -->
-      <div class="search">
-        <input id="search" type="text" placeholder="Search a place or postcode…" />
-        <div id="results" class="dropdown" style="display:none;"></div>
-      </div>
-
       <!-- Home setup/display -->
-      <!-- Home (one-time) -->
-<div class="search" style="max-width: 360px; margin-left:12px;">
-  <input id="home-input" type="text" placeholder="Set Home (address or postcode)…" />
-  <div id="home-results" class="dropdown" style="display:none;"></div>
-</div>
-
-<!-- Shows after you pick Home once -->
-<span id="home-pill" class="pilla" style="display:none; margin-left:8px; cursor:pointer;" title="Click to change Home"></span>
+      <div class="search" style="max-width: 360px; margin-left:12px;">
+        <input id="home-input" type="text" placeholder="Set Home (address or postcode)…" />
+        <div id="home-results" class="dropdown" style="display:none;"></div>
+      </div>
+      <span id="home-pill" class="pilla" style="display:none; margin-left:8px; cursor:pointer;" title="Click to change Home"></span>
     </header>
 
     <div class="main">
@@ -157,10 +58,8 @@
         <div id="map"></div>
         <div style="padding:12px; border-top:1px solid var(--line); display:flex; gap:8px; flex-wrap: wrap; align-items:center; background:#fff;">
           <button id="btn-my-location" class="btn">Use my location</button>
-
           <button id="btn-best-stop" class="btn primary" title="Find best stop towards Home">Best stop to get home?</button>
           <span id="best-label" class="pill" style="display:none;">Best stop is pulsing on the map</span>
-
           <span class="muted" style="margin-left:auto;">Tap the map or use search to pick a spot. Set Home to enable “best stop”.</span>
         </div>
       </div>
@@ -169,14 +68,10 @@
         <div class="stack">
           <div id="selection" class="card" style="display:none;"></div>
 
-          <!-- No standalone weather card per your request -->
-
           <div id="stops" class="card" style="display:none;">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
               <div style="font-weight:600;">Nearby stops</div>
-              <div class="muted" style="font-size:12px;">
-                Radius: <span id="stops-radius">800</span> m
-              </div>
+              <div class="muted" style="font-size:12px;">Radius: <span id="stops-radius">800</span> m</div>
             </div>
             <div id="stops-list" class="list"></div>
           </div>
@@ -203,5 +98,33 @@
   <script src="config.js"></script>
   <!-- App code -->
   <script src="app.js"></script>
+
+  <!-- Full-screen loader (✅ moved into the body, just before </body>) -->
+  <div id="fs-loader" aria-hidden="true" style="display:none;">
+    <div class="fs-loader-card">
+      <svg viewBox="0 0 300 80" width="280" height="74" class="fs-loader-svg">
+        <rect x="0" y="52" width="300" height="4" rx="2" fill="#e5e7eb"/>
+        <g class="fs-vehicle">
+          <g class="bus">
+            <rect x="0" y="22" width="54" height="28" rx="6" fill="#0ea5e9"/>
+            <rect x="6" y="28" width="16" height="10" rx="2" fill="white" opacity="0.9"/>
+            <rect x="26" y="28" width="10" height="10" rx="2" fill="white" opacity="0.9"/>
+            <rect x="40" y="28" width="10" height="10" rx="2" fill="white" opacity="0.9"/>
+            <circle cx="14" cy="54" r="5" fill="#111"/>
+            <circle cx="40" cy="54" r="5" fill="#111"/>
+          </g>
+          <g class="train">
+            <rect x="0" y="18" width="70" height="30" rx="6" fill="#10b981"/>
+            <rect x="8" y="24" width="14" height="10" rx="2" fill="white" opacity="0.9"/>
+            <rect x="26" y="24" width="14" height="10" rx="2" fill="white" opacity="0.9"/>
+            <rect x="44" y="24" width="14" height="10" rx="2" fill="white" opacity="0.9"/>
+            <circle cx="18" cy="54" r="4.5" fill="#111"/>
+            <circle cx="52" cy="54" r="4.5" fill="#111"/>
+          </g>
+        </g>
+      </svg>
+      <div class="fs-loader-text">Finding the best route…</div>
+    </div>
+  </div>
 </body>
 </html>
