@@ -1,27 +1,26 @@
 /* ===========================
    FreshStop - app.js (browser)
    ===========================
-
    - Start at browser location (fallback: saved Home → London)
    - Only "Set Home" search (autocomplete)
    - Nearby stops (Overpass) with mirrors + timeout
    - Weather: Open-Meteo (no key) + mini 3h forecast
    - BEST STOP: green pulsing Board + red ring Alight, walking legs, Best card
-   - Popups/list show SERVED LINES (🚌/🚆/🚊…) from OSM route relations (no arrivals/proxy)
-   - Skeleton placeholders instead of "Loading …"
+   - Popups/list show SERVED LINES (🚌/🚆/🚊…) from OSM route relations (no live arrivals)
+   - Robust route fetching: looks for stop_position/platform near the stop
 */
 
 // ---- Config defaults (override in config.js) ----
 window.CONFIG = Object.assign({
-  HOME: { name: "Home", lat: 51.5074, lon: -0.1278 }, // Central London fallback
+  HOME: { name: "Home", lat: 51.5074, lon: -0.1278 },
   OVERPASS_MIRRORS: [
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
     "https://overpass.openstreetmap.ru/api/interpreter"
   ],
   OSRM_URL: "https://router.project-osrm.org",
-  SEARCH_RADIUS_M: 800,
-  MAX_STOPS: 50,
+  SEARCH_RADIUS_M: 900,
+  MAX_STOPS: 60,
   WALK_SPEED_MPS: 1.3,
   OVERPASS_TIMEOUT_MS: 9000
 }, window.CONFIG || {});
@@ -52,7 +51,6 @@ function fmtCoord(lat, lon){ return `${lat.toFixed(4)}, ${lon.toFixed(4)}`; }
 function skel(width='100%', height=14, radius=8, style=''){
   return `<div style="width:${width};height:${height}px;border-radius:${radius}px;background:linear-gradient(90deg,#f3f4f6 25%,#e5e7eb 37%,#f3f4f6 63%);background-size:400% 100%;animation:skel 1.2s ease infinite;${style}"></div>`;
 }
-// Inject skeleton keyframes once
 (function injectSkelCSS(){
   if (document.getElementById('skel-anim')) return;
   const s=document.createElement('style'); s.id='skel-anim';
@@ -81,7 +79,6 @@ function initMap(center){
   stopsLayer = L.layerGroup().addTo(map);
   routeLayer = L.layerGroup().addTo(map);
 
-  // Pick a selection by clicking the map
   map.on('click', async e=>{
     const {lat,lng}=e.latlng;
     currentSelection = { lat, lon: lng, label: 'Selected point' };
@@ -143,17 +140,10 @@ async function fetchWithTimeout(url, opts={}, timeoutMs=CONFIG.OVERPASS_TIMEOUT_
   try{ return await fetch(url, { ...opts, signal: ctrl.signal }); }
   finally{ clearTimeout(t); }
 }
-async function fetchStopsAround(lat, lon, radiusM=CONFIG.SEARCH_RADIUS_M){
-  const q=`[out:json][timeout:25];
-    (node(around:${radiusM},${lat},${lon})["highway"="bus_stop"];
-     node(around:${radiusM},${lat},${lon})["public_transport"="platform"]["bus"="yes"];);
-    out body ${Math.min(CONFIG.MAX_STOPS,200)};`;
-
-  const body="data="+encodeURIComponent(q);
-  const mirrors = CONFIG.OVERPASS_MIRRORS;
-  let lastErr=null, json=null;
-
-  for (const base of mirrors) {
+async function overpassJSON(query){
+  const body="data="+encodeURIComponent(query);
+  let lastErr=null;
+  for (const base of CONFIG.OVERPASS_MIRRORS) {
     try{
       const r = await fetchWithTimeout(base, {
         method:"POST",
@@ -161,15 +151,26 @@ async function fetchStopsAround(lat, lon, radiusM=CONFIG.SEARCH_RADIUS_M){
         body
       });
       if (!r.ok) { lastErr = new Error(`Overpass ${r.status} at ${base}`); continue; }
-      json = await r.json();
-      break;
+      return await r.json();
     }catch(e){ lastErr = e; }
   }
-  if (!json) throw lastErr || new Error("Overpass failed");
-  return (json.elements||[]).map(n=>({id:n.id,name:n.tags?.name||"Bus stop",lat:n.lat,lon:n.lon,ref:n.tags?.ref||n.tags?.naptan||n.tags?.naptan_code||null}));
+  throw lastErr || new Error("Overpass failed");
 }
-
-// Extended for home area (prefer bus stations)
+async function fetchStopsAround(lat, lon, radiusM=CONFIG.SEARCH_RADIUS_M){
+  const q=`[out:json][timeout:25];
+    (
+      node(around:${radiusM},${lat},${lon})["highway"="bus_stop"];
+      node(around:${radiusM},${lat},${lon})["public_transport"="platform"]["bus"="yes"];
+    );
+    out body ${Math.min(CONFIG.MAX_STOPS,200)};`;
+  const j = await overpassJSON(q);
+  return (j.elements||[]).map(n=>({
+    id:n.id,
+    name:n.tags?.name||"Bus stop",
+    lat:n.lat, lon:n.lon,
+    ref:n.tags?.ref||n.tags?.naptan||n.tags?.naptan_code||null
+  }));
+}
 async function fetchStopsAroundExtended(lat, lon, radiusM = CONFIG.SEARCH_RADIUS_M) {
   const q = `[out:json][timeout:25];
     (
@@ -178,25 +179,8 @@ async function fetchStopsAroundExtended(lat, lon, radiusM = CONFIG.SEARCH_RADIUS
       node(around:${radiusM},${lat},${lon})["amenity"="bus_station"];
     );
     out body ${Math.min(CONFIG.MAX_STOPS, 300)};`;
-  const body = "data=" + encodeURIComponent(q);
-
-  const mirrors = CONFIG.OVERPASS_MIRRORS || ["https://overpass-api.de/api/interpreter"];
-  let json = null, lastErr = null;
-
-  for (const base of mirrors) {
-    try {
-      const r = await fetch(base, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
-        body
-      });
-      if (!r.ok) { lastErr = new Error(`Overpass ${r.status}`); continue; }
-      json = await r.json(); break;
-    } catch (e) { lastErr = e; }
-  }
-  if (!json) throw lastErr || new Error("Overpass failed");
-
-  return (json.elements || []).map(n => ({
+  const j = await overpassJSON(q);
+  return (j.elements || []).map(n => ({
     id: n.id,
     name: n.tags?.name || (n.tags?.amenity === 'bus_station' ? 'Bus Station' : 'Bus stop'),
     lat: n.lat, lon: n.lon,
@@ -205,59 +189,48 @@ async function fetchStopsAroundExtended(lat, lon, radiusM = CONFIG.SEARCH_RADIUS
   }));
 }
 
-// ---- Lines for a stop (route relations) ----
-const LINES_CACHE = new Map(); // id -> [{mode,ref,name,network}]
+// ---- Lines for a stop (route relations via nearby PT members) ----
+const LINES_CACHE = new Map(); // stopId -> lines[]
 const MODE_ICON = m => ({
   bus:'🚌', trolleybus:'🚎', tram:'🚊', train:'🚆',
   light_rail:'🚈', subway:'🚇'
 }[m] || '🚌');
+function uniqBy(arr, key) { const s=new Set(), out=[]; for(const x of arr){const k=key(x); if(s.has(k))continue; s.add(k); out.push(x);} return out; }
 
-function uniqBy(arr, key) {
-  const seen = new Set(); const out=[];
-  for (const x of arr) { const k = key(x); if (seen.has(k)) continue; seen.add(k); out.push(x); }
-  return out;
-}
+async function fetchStopLines(stop){
+  const cache = LINES_CACHE.get(stop.id);
+  if (cache) return cache;
 
-async function fetchStopLines(stopId) {
-  if (LINES_CACHE.has(stopId)) return LINES_CACHE.get(stopId);
-
+  // Look for any platforms/stop_positions within 60m of this stop,
+  // then get route relations that include those PT members.
   const q = `[out:json][timeout:25];
-    relation(bn:${stopId})["type"="route"]["route"~"bus|trolleybus|tram|train|light_rail|subway"];
+    node(${stop.id})->.s;
+    (
+      node(around.s:60)["public_transport"];
+      way(around.s:60)["public_transport"];
+    )->.pt;
+    rel(bn.pt)["type"="route"]["route"~"bus|trolleybus|tram|train|light_rail|subway"];
     out tags;`;
-  const body = "data=" + encodeURIComponent(q);
+  let j=null; try { j = await overpassJSON(q); } catch(e){ console.warn('lines fail', e); LINES_CACHE.set(stop.id, []); return []; }
 
-  let json=null, lastErr=null;
-  for (const base of CONFIG.OVERPASS_MIRRORS) {
-    try{
-      const r = await fetchWithTimeout(base, {
-        method:"POST",
-        headers:{"Content-Type":"application/x-www-form-urlencoded;charset=UTF-8"},
-        body
-      });
-      if (!r.ok) { lastErr = new Error(`Overpass ${r.status}`); continue; }
-      json = await r.json(); break;
-    }catch(e){ lastErr=e; }
-  }
-  if (!json) { console.warn('lines fetch failed', lastErr); LINES_CACHE.set(stopId, []); return []; }
-
-  const items = (json.elements||[])
+  const items = (j.elements||[])
     .map(rel => {
       const t = rel.tags || {};
+      const ref = t.ref || t['ref:short'] || '';
+      const name = t.name || '';
       return {
         mode: t.route || 'bus',
-        ref: t.ref || t['ref:short'] || t.name || '',
-        name: t.name || '',
+        ref: ref || (name ? name.split(' ')[0] : ''),
+        name,
         network: t.network || ''
       };
     })
     .filter(x => x.ref || x.name);
 
-  // Dedup by (mode,ref/name)
   const clean = uniqBy(items, x => `${x.mode}|${x.ref || x.name}`).slice(0, 16);
-  LINES_CACHE.set(stopId, clean);
+  LINES_CACHE.set(stop.id, clean);
   return clean;
 }
-
 function linesBadgesHTML(lines){
   if (!lines || !lines.length) return `<span class="muted">No routes listed</span>`;
   return `
@@ -270,15 +243,17 @@ function linesBadgesHTML(lines){
     </div>`;
 }
 
-// ---- Best stops logic ----
+// ---- Best stops logic (smarter alight for Horsefair/Bus Station) ----
 async function findBestPair(origin, home) {
   const [nearOrigin, nearHome0] = await Promise.all([
     fetchStopsAround(origin.lat, origin.lon),
     fetchStopsAroundExtended(home.lat, home.lon, CONFIG.SEARCH_RADIUS_M)
   ]);
-  const nearHome = nearHome0.length < 3
-    ? await fetchStopsAroundExtended(home.lat, home.lon, CONFIG.SEARCH_RADIUS_M * 2)
-    : nearHome0;
+
+  // If too few near home, widen progressively (up to ~3km)
+  let nearHome = nearHome0;
+  if (nearHome.length < 3) nearHome = await fetchStopsAroundExtended(home.lat, home.lon, CONFIG.SEARCH_RADIUS_M * 2);
+  if (nearHome.length < 3) nearHome = await fetchStopsAroundExtended(home.lat, home.lon, CONFIG.SEARCH_RADIUS_M * 3.3);
 
   if (!nearOrigin.length) throw new Error("No stops near origin");
   if (!nearHome.length)   throw new Error("No stops near home");
@@ -292,17 +267,41 @@ async function findBestPair(origin, home) {
     }))
     .sort((a,b)=> a.score - b.score)[0].s;
 
-  // Alight near home, prefer "Horsefair"/"Bus Station"/"Interchange"
+  // Alight: strong preference by name ("Horsefair", "Bus Station", "Interchange"), else nearest
   const nameBoost = (nm='') => {
     const n = nm.toLowerCase();
-    if (n.includes('horsefair')) return -250;
-    if (n.includes('bus station') || n.includes('interchange')) return -120;
+    if (n.includes('horsefair')) return -800; // very strong nudge
+    if (n.includes('bus station') || n.includes('interchange')) return -250;
     return 0;
   };
-  const alight = nearHome
+
+  // First pass: score by distance + name boost
+  let alight = nearHome
     .filter(s => s.id !== board.id)
     .map(s => ({ s, score: haversineMeters(home, s) + nameBoost(s.name) }))
-    .sort((a,b)=> a.score - b.score)[0]?.s || nearHome[0].s;
+    .sort((a,b)=> a.score - b.score)[0]?.s;
+
+  // If we still didn't land on a "Horsefair"/station and we're within ~3km, try a targeted name query
+  if (!alight || (!/horsefair|bus station|interchange/i.test(alight.name) && haversineMeters(home, alight) > 250)) {
+    const q = `[out:json][timeout:25];
+      (
+        node(around:${Math.round(CONFIG.SEARCH_RADIUS_M*3.3)},${home.lat},${home.lon})["name"~"(?i)horsefair|bus station|interchange"]["public_transport"];
+        node(around:${Math.round(CONFIG.SEARCH_RADIUS_M*3.3)},${home.lat},${home.lon})["name"~"(?i)horsefair|bus station|interchange"]["amenity"="bus_station"];
+      );
+      out body 50;`;
+    try {
+      const j = await overpassJSON(q);
+      const cand = (j.elements||[])
+        .map(n => ({ id:n.id, name:n.tags?.name||'Stop', lat:n.lat, lon:n.lon, ref:n.tags?.ref||null }))
+        .sort((a,b)=> haversineMeters(home,a) - haversineMeters(home,b))[0];
+      if (cand) alight = cand;
+    } catch(e){ /* ignore, keep previous alight */ }
+  }
+
+  // Fallback to pure nearest if somehow empty
+  if (!alight) {
+    alight = nearHome.sort((a,b)=>haversineMeters(home,a)-haversineMeters(home,b))[0];
+  }
 
   return { board, alight };
 }
@@ -323,7 +322,7 @@ function writeWalkSummary(w1, w2, board, alight){
   if(w1) steps.push(`<div class="dir-step">Walk to stop: ${fmtMins(w1.duration_s/60)}</div>`);
   if(alight) steps.push(`<div class="dir-step"><strong>Alight at:</strong> ${alight.name}</div>`);
   if(w2) steps.push(`<div class="dir-step">Walk home: ${fmtMins(w2.duration_s/60)}</div>`);
-  steps.push(`<div class="muted" style="font-size:12px;">Note: live bus times removed; this shows walking only.</div>`);
+  steps.push(`<div class="muted" style="font-size:12px;">(Live bus times removed; this shows walking only.)</div>`);
   writeDirections(steps.join(''));
 }
 
@@ -344,14 +343,13 @@ async function enhanceStopPopup(marker, stop){
   const linesEl = root.querySelector('.lines');
   if (linesEl) {
     try {
-      const lines = await fetchStopLines(stop.id);
+      const lines = await fetchStopLines(stop);
       linesEl.innerHTML = `<div><strong>Served by</strong></div>${linesBadgesHTML(lines)}`;
     } catch {
       linesEl.innerHTML = `<em class="muted">Routes unavailable</em>`;
     }
   }
 }
-// Helper: bind + enhance reliably
 function bindPopupWithEnhancement(marker, stop){
   marker.bindPopup(popupTemplate(stop));
   marker.on('popupopen', () => enhanceStopPopup(marker, stop));
@@ -376,7 +374,7 @@ async function listNearbyStops(){
   catch(e){ showError("Couldn’t load stops (network busy). Try again in a moment."); }
   stopsLayer.clearLayers(); listEl.innerHTML='';
   for(const s of stops){
-    const m=bindPopupWithEnhancement(L.marker([s.lat,s.lon],{title:s.name}).addTo(stopsLayer), s);
+    bindPopupWithEnhancement(L.marker([s.lat,s.lon],{title:s.name}).addTo(stopsLayer), s);
     const item=document.createElement('div'); item.className='stop-item';
     item.innerHTML=`<div class="stop-left">
       <div class="stop-name">${s.name}</div>
@@ -389,7 +387,7 @@ async function listNearbyStops(){
 
     const wxEl=item.querySelector(`#wx-${s.id}`); renderWeather(wxEl, s.lat, s.lon).catch(()=>{});
     const lnEl=item.querySelector(`#ln-${s.id}`);
-    fetchStopLines(s.id).then(lines=>{
+    fetchStopLines(s).then(lines=>{
       lnEl.innerHTML = lines.length
         ? `<div class="muted" style="font-size:12px;">Routes:</div>${linesBadgesHTML(lines)}`
         : `<span class="muted">No routes listed</span>`;
@@ -478,7 +476,7 @@ function updateHomeUI(){
   }
 }
 
-// ---- Best card renderer (with weather + mini 3h forecast + routes) ----
+// ---- Best card (weather + mini forecast + routes) ----
 function ensureBestCard(){
   if (el('#beststop')) return el('#beststop');
   const asideStack = document.querySelector('aside .stack');
@@ -499,10 +497,9 @@ async function renderBestCard(best){
   const walkToStop = w1 ? fmtMins(w1.duration_s/60) : '—';
   const walkHome   = w2 ? fmtMins(w2.duration_s/60) : '—';
 
-  // Preload lines (don’t block UI)
   const [boardLines, alightLines] = await Promise.all([
-    fetchStopLines(board.id).catch(()=>[]),
-    fetchStopLines(alight.id).catch(()=>[])
+    fetchStopLines(board).catch(()=>[]),
+    fetchStopLines(alight).catch(()=>[])
   ]);
 
   card.innerHTML = `
@@ -682,7 +679,6 @@ async function main(){
     userMarker=L.marker([center.lat,center.lon]).addTo(map).bindPopup('You are here');
   }
 
-  // Ensure Best card container exists
   ensureBestCard();
 
   await refreshSelection();
