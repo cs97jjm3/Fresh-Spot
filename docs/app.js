@@ -641,6 +641,32 @@ async function main(){
 
   wireButtons();
   wireHomeSearch();
+
+   // ---- Map init ----
+function initMap(center){
+  if (map) return;
+  map = L.map('map').setView([center.lat, center.lon], 15);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19, attribution: '&copy; OpenStreetMap'
+  }).addTo(map);
+
+  homeMarker = L.marker([home.lat, home.lon], { title: 'Home' })
+    .addTo(map)
+    .bindPopup('Home');
+
+  stopsLayer = L.layerGroup().addTo(map);
+  routeLayer = L.layerGroup().addTo(map);
+
+  // Map click to pick a new selection
+  map.on('click', async e=>{
+    const {lat,lng}=e.latlng;
+    currentSelection = { lat, lon: lng, label: 'Selected point' };
+    map.setView([lat,lng], Math.max(map.getZoom(), 15));
+    await refreshSelection();
+    await listNearbyStops();
+  });
+}
+
 }
 
 // ---- Start ----
